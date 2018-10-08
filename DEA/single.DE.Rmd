@@ -1,0 +1,160 @@
+---
+title: "DE analysis in one type"
+author: "Chi-Lam Poon"
+date: "9/17/2018"
+output: html_document
+---
+
+```{R setup, include=F}
+library(edgeR)
+library(limma)
+library(dplyr)
+library(gplots)
+source("/home/rstudio/tcga/plot.func.R")
+```
+
+### Loading 
+
+```{R load}
+dir <- "/home/ubuntu/storage/tcga"
+cdr <- read.csv(file.path(dir,"clinic/new.filt.cdr.csv"), header = T, row.names = 1)
+pcg_txi <- readRDS(file.path(dir,"txi.split/pcg.txi.rds"),refhook = NULL)
+cfa <- pcg_txi$countsFromAbundance
+```
+
+### To find out which types
+
+```{R}
+m_count <- cdr %>% 
+  group_by(type, Metastasis) %>%
+  summarise(counts=n())
+m_count[which(m_count$Metastasis == "yes" & m_count$counts >=10), ]
+```
+
+####### Tissues with more than 10 metastasis samples:
+
+- BLCA
+- BRCA
+- CESC
+- ESCA
+- HNSC
+- LUAD
+- LUSC
+- PAAD
+- SARC
+- STAD
+- THCA
+
+####### For each type, firstly devide the cdr file into different cohorts, then use the sample barcode to seperate the cfa matrix, saving in a directory.
+
+
+### Laod processed gene annotation file
+
+```{R, eval=T}
+fData <- read.delim(file.path(dir, "annotation/fData.txt"), header = T, row.names = 1)
+meta <- "Metastasisyes"
+```
+
+
+### Loop over each tissue
+
+```{R}
+all_type <- c("BLCA", "BRCA", "CESC", "ESCA", "HNSC", "LUAD", "LUSC", "PAAD", "SARC", "STAD", "THCA")
+d1_dir <- "/home/ubuntu/storage/tcga/dea/single"
+
+# Assign objects for each type
+for (tissue in all_type){
+  t_cdr <- cdr %>% filter(type==tissue)
+  t_cfa <- cfa[,as.vector(t_cdr$sample_barcode)]
+  
+  dge <- DGEList(t_cfa)
+  keep <- filterByExpr(dge)
+  dge_filt <- dge[keep, ]
+  dge_filt <- calcNormFactors(dge_filt)
+  
+  geneid <- rownames(dge_filt$counts)
+  anno <- fData[geneid, ]
+  gl <- as.vector(anno$geneNames)
+  design1 <- model.matrix(~ Metastasis, data = t_cdr)
+  v1 <- voom(dge_filt, design1, plot=F)
+  fit1 <- lmFit(v1, design1)
+  fit1 <- eBayes(fit1)
+  tt1 <- topTable(fit1, number=Inf, genelist=gl, coef=meta)
+  write.table(tt1, file=sprintf("%s/table/%s.tsv", d1_dir, tissue), sep="\t", quote = F)
+  pdf(sprintf("%s/plot/%s.volcanoplot.pdf", d1_dir, tissue))
+    limma::volcanoplot(fit1, coef=meta, highlight=4, names=gl, main=tissue)
+  dev.off()
+  pdf(sprintf("%s/plot/%s.MAplot.pdf", d1_dir, tissue))
+    limma::plotMA(fit1, main=tissue)
+  dev.off()
+}
+```
+
+##### Try YARN????
+
+```{R}
+sig_count <- c()
+for (i in all_type){
+  tempt <- read.table(sprintf("%s/table/%s.tsv", d1_dir, i), sep='\t', header=T)
+  sig_count <- c(sig_count, nrow(tempt[tempt$adj.P.Val<0.1,]))
+}
+sc_df <- data.frame(
+  type = all_type,
+  count = sig_count
+)
+
+
+ggplot(data=sc_df, aes(x=type, y=count)) +
+  geom_bar(stat="identity", fill="gold", color="black") +
+  scale_x_discrete(limits=rev(levels(sc_df$type))) +
+  geom_text(aes(label=count),vjust=0.25, hjust=-0.3, size=2.7) +
+  labs(title="DEGs with q<0.1") +
+  coord_flip() + theme_bw()
+
+```
+
+### Find out the overlapped genes
+
+###### HNSC, LUAD, LUSC, THCA
+
+```{R}
+for (k in c("HNSC", "LUAD", "LUSC", "THCA")){
+  df <- read.table(sprintf("%s/table/%s.tsv", d1_dir, k), sep='\t', header=T)
+  assign(paste0(k,"_gene"), rownames(df[df$adj.P.Val<0.1,]))
+}
+
+venn_all <- venn(list(HNSC=HNSC_gene,
+                      LUAD=LUAD_gene,
+                      LUSC=LUSC_gene,
+                      THCA=THCA_gene), intersections=F)
+
+venn1 <- venn(list(HNSC=HNSC_gene,
+                   LUSC=LUSC_gene), intersections = T)
+
+venn2 <- venn(list(HNSC=HNSC_gene,
+                   THCA=THCA_gene), intersections = T)
+
+venn3 <- venn(list(LUSC=LUSC_gene,
+                   THCA=THCA_gene), intersections = T)
+
+w_dir <- "/home/ubuntu/storage/tcga/dea/whole"
+d1_all <- read.delim(file.path(w_dir,"table/all.types.d1.txt"), sep='\t', header=T)
+d2_all <- read.delim(file.path(w_dir,"table/all.types.d2.txt"), sep='\t', header=T)
+d1_gene <- rownames(d1_all[d1_all$adj.P.Val<0.1,])
+d2_gene <- rownames(d2_all[d2_all$adj.P.Val<0.1,])
+
+venn4 <- venn(list(d1=d1_gene,
+                   d2=d2_gene,
+                   HNSC=HNSC_gene), intersections = T)
+venn5 <- venn(list(d1=d1_gene,
+                   d2=d2_gene,
+                   LUSC=LUSC_gene), intersections = T)
+venn6 <- venn(list(d1=d1_gene,
+                   d2=d2_gene,
+                   THCA=THCA_gene), intersections = T)
+
+```
+
+
+
+

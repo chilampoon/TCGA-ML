@@ -1,0 +1,217 @@
+---
+title: "Limma-voom DE Analysis 1"
+output: html_document
+---
+
+####### Here using the protein-coding gene subset from previous data processing to conduct differential expression analysis, and also build the main pipeline.
+
+```{R setup, include=F}
+library(edgeR)
+library(limma)
+library(dplyr)
+library(gplots)
+source("/home/rstudio/tcga/plot.func.R")
+```
+
+### Load data
+
+```{R}
+dir <- "/home/ubuntu/storage/tcga"
+pcg_txi <- readRDS(file.path(dir,"txi.split/pcg.txi.rds"),refhook = NULL)
+new_cdr <- read.csv(file.path(dir,"clinic/new.filt.cdr.csv"), row.names = 1)
+#sample_info <- read.delim(file.path(dir,"clinic/sample.info.tsv"), header=T)
+cfa <- pcg_txi$countsFromAbundance
+```
+
+### Fitler out samples with large proportion of lowly-expressed genes
+####### Here 5 samples which had extremely low library size were filted out, so the sample size would go down from 6125 to 6120.
+
+```{R}
+counts <- sort(colSums(cfa))
+counts[1:10]
+rm_id <- names(counts[1:5])
+cfa <- as.data.frame(cfa)[, -which(colnames(cfa) %in% rm_id)]
+cfa <- data.matrix(cfa)
+new_cdr <- new_cdr[-which(rownames(new_cdr) %in% rm_id),]
+dim(cfa)
+dim(new_cdr)
+```
+
+### Remove lowly-expressed genes
+
+```{R, fig.height=6, fig.width=14}
+# Create dge object
+dge <- DGEList(cfa)
+
+# Filtering - remove rows that consistently have zero or very low counts
+keep <- filterByExpr(dge)
+table(keep) # remove 4873 genes
+dge_filt <- dge[keep, ]
+
+# Draw density plot
+lcpm <- cpm(dge, log=T)
+lcpm_f <- cpm(dge_filt, log=T)
+nsamples <- ncol(dge)
+dp_col <- get_colVector(nsamples)
+par(mfrow=c(1,2), las=1) 
+draw_densityPlot(lcpm, dp_col, nsamples)
+draw_densityPlot(lcpm_f, dp_col, nsamples)
+```
+
+### Normalize
+
+```{R}
+# Apply TMM normalization method (optional...)
+dge_filt <- calcNormFactors(dge_filt)
+
+# Draw boxplots to see the effect, using 20 samples.
+col_box <- get_colVector(20)
+boxplot(lcpm_f[,1:20], las=2, col=col_box, main="log-CPM before normalization")
+lcpm_f <- cpm(dge_filt, log=T)
+boxplot(lcpm_f[,1:20], las=2, col=col_box, main="log-CPM after TMM normalization")
+```
+
+### Laod processed gene annotation file
+
+```{R, eval=T}
+fData <- read.delim(file.path(dir, "annotation/fData.txt"), header = T, row.names = 1)
+geneid <- rownames(dge_filt$counts)
+anno <- fData[geneid,]
+gl <- as.vector(anno$geneNames)
+```
+
+### Apply limma-voom pipeline
+##### 1. one factor 
+
+```{R}
+meta <- "Metastasisyes"
+design1 <- model.matrix(~ Metastasis, data = new_cdr)
+head(design1, 5)
+```
+####### The first coefficient estimates the mean log-expression for non-metastasized samples and play the role of an intercept. The second one estimates the difference between meta v.s. non-meta. This approach is equal to (~ 0 + Metastasis) then use contrast matrix [confirmed].
+
+```{R, fig.height=6, fig.width=7}
+v1 <- voom(dge_filt, design1, plot = T) 
+fit1 <- lmFit(v1, design1)
+fit1 <- eBayes(fit1)
+tt1 <- topTable(fit1, number=Inf, genelist=gl, coef=meta)
+head(tt1, 20)
+volp1 <- volcanoplot(fit1, coef=meta, highlight = 4, names=gl)
+map1 <- plotMA(fit1, main = "did not correct for cancer type")
+summary(decideTests(fit1)) # 5309 down; 4652 up
+draw_SigCounts(tt1)
+plot(density(tt1$logFC), col="skyblue", lwd=3, main="logFC density (design 1)",xlab="logFC")
+```
+
+- Acutally the limma-voom results were similar after removing some samples with extremely low library size, while the limma-trend results were slightly better.
+
+### Swarm plots for top genes in each cancer type
+##### Wilcoxon rank sum test for comparison in each tissue
+
+```{R, fig.height=14, fig.width=14}
+geneList <- rownames(tt1[1:3,])
+draw_boxplot(dge_filt$counts,tt1,new_cdr,geneList[1])
+draw_boxplot(dge_filt$counts,tt1,new_cdr,geneList[2])
+draw_boxplot(dge_filt$counts,tt1,new_cdr,geneList[3])
+```
+
+
+####### Draw the heatmap for the top 50 DEGs from limma-voom results of metastasis v.s. non-metastasis comparison only.
+###### Try annotation: 
+
+1. cancer type; 
+2. ajcc_pathologic_tumor_stage (this reflects the stage at initial pathologic diagnosis)
+
+```{R, fig.height=12, fig.width=15}
+select_gene <- rownames(tt1[(tt1$adj.P.Val < 0.05 & abs(tt1$logFC) > log2(2)),])
+
+h1 <- draw_heatmap(v1, tt1, new_cdr, anno, select_gene[1:50])
+```
+
+---
+
+##### 2. two factor model
+```{R, fig.height=6, fig.width=7}
+design2 <- model.matrix(~ type + Metastasis, data = new_cdr)
+head(design2,3)
+v2 <- voom(dge_filt, design2, plot = T)
+fit2 <- lmFit(v2, design2)
+fit2 <- eBayes(fit2)
+tt2 <- topTable(fit2, number=Inf,genelist = gl, coef=meta)
+head(tt2, 20)
+volp2 <- volcanoplot(fit2, coef=meta, highlight = 6, names=gl)
+map2 <- plotMA(fit2, main = "correct for cancer type")
+
+draw_SigCounts(tt2)
+plot(density(tt2$logFC), col="steelblue", lwd=3, main="logFC density (design 2)",xlab="logFC")
+```
+
+```{R, fig.height=8, fig.width=14}
+
+geneList2 <- rownames(tt2[1:3,])
+draw_boxplot(dge_filt$counts,tt2,new_cdr,geneList2[1])
+draw_boxplot(dge_filt$counts,tt2,new_cdr,geneList2[2])
+draw_boxplot(dge_filt$counts,tt2,new_cdr,geneList2[3])
+
+select_gene2 <- rownames(tt2[(tt2$adj.P.Val < 0.05 & abs(tt2$logFC) > log2(1.2)),])
+h2 <- draw_heatmap(v2, tt2, new_cdr, anno, select_gene2)
+```
+
+
+### Overlapped genes in the results of design 1 & 2
+
+```{R}
+gene_d1 <- rownames(tt1[tt1$adj.P.Val < 0.05,])
+gene_d2 <- rownames(tt2[tt2$adj.P.Val < 0.05,])
+ven1 <- venn(list(design1=gene_d1, design2=gene_d2), intersections = T)
+isect <- attr(ven1, "intersection")
+d2_only <- isect$design2
+anno[d2_only,]$geneNames
+tt1[d2_only,]$adj.P.Val
+tt2[d2_only,]$adj.P.Val
+```
+
+
+### Save files
+
+```{R}
+w_dir <- "/home/ubuntu/storage/tcga/dea/whole"
+write.table(tt1, file=file.path(w_dir,"table/all.types.d1.txt"), sep="\t", quote=F)
+pdf(file.path(w_dir,"plot/all.d1.volcanoplot.pdf"))
+  volp1
+dev.off()
+pdf(file.path(w_dir,"plot/all.d1.maplot.pdf"))
+  map1
+dev.off()
+
+write.table(tt2, file=file.path(w_dir,"table/all.types.d2.txt"), sep="\t", quote=F)
+pdf(file.path(w_dir,"table/all.d2.volcanoplot.pdf")) 
+  volp2
+dev.off()
+pdf(file.path(w_dir,"plot/all.d2.maplot.pdf"))
+  map2
+dev.off()
+
+```
+
+---
+
+##### limma-trend
+####### If the sequencing depth is reasonably consistent across the RNA samples. This approach will usually work well if the ratio of the largest library size to the smallest is not more than about 3-fold. It's faster than limma-voom though using more memories.
+
+
+```{R, include = T, eval=F}
+## library size:
+countsSum <- colSums(dge_filt$counts)
+max(countsSum) / min(countsSum) # 55.29538 
+
+logCPM <- cpm(dge_filt, log=T, prior.count = 2.5)
+fit_lt <- lmFit(logCPM, design1)
+fit_lt <- eBayes(fit_lt, trend = T)
+tt_lt <- topTable(fit_lt, number=Inf,genelist = gl, coef=meta)
+head(tt_lt,20)
+volcanoplot(fit_lt, coef=meta, highlight = 4, names=gl)
+plotMA(fit_lt, main = "no correct for cancer type")
+```
+
+

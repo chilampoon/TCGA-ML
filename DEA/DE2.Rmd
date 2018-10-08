@@ -1,0 +1,136 @@
+---
+title: "Limma-voom DE Analysis 1-2: exclusion of some cancer tissues"
+output: html_document
+---
+
+According to previous analysis, eight kinds of tumor didn't have any metastatic samples: 
+
+-CHOL 
+-GBM
+-KICH
+-KIRC
+-KIRP
+-LGG
+-LIHC
+-OV
+
+####### Actually some cancer types only had less than 5 metastatic samples: COAD, PCPG, PRAD, READ, SKCM, TGCT, THYM. I tried to excluded those had 0 metastatic sample then apply the limma-voom pipeline to see if the results will be better or not. Temporary using the protein coding gene subset.
+
+```{R setup, include=F}
+library(edgeR)
+library(limma)
+library(dplyr)
+library(gplots)
+source("/home/rstudio/tcga/plot.func.R")
+```
+
+### Exclude samples of those cancer types:
+
+```{R}
+# Loading data
+dir <- "/home/ubuntu/storage/tcga"
+pcg_txi <- readRDS(file.path(dir,"txi.split/pcg.txi.rds"),refhook = NULL)
+new_cdr <- read.csv(file.path(dir,"clinic/new.filt.cdr.csv"), row.names = 1)
+cfa <- pcg_txi$countsFromAbundance
+
+# Filtering
+ex_type <- c("CHOL", "GBM", "KICH", "KIRC", "KIRP", "LGG", "LIHC", "OV")
+new_pheno <- new_cdr %>% filter(!type %in% ex_type)
+rownames(new_pheno) <- new_pheno$sample_barcode
+dim(new_pheno)[1]
+new_samID <- as.vector(new_pheno$sample_barcode)
+cfa2 <- as.data.frame(cfa)[, new_samID]
+```
+
+
+```{R}
+dge <- DGEList(cfa2)
+
+# Remove consistently lowly expressed genes (skipped)
+keep <- filterByExpr(dge)
+dge_filt <- dge[keep, ]
+table(keep)
+# Normalization (skipped?)
+dge <- calcNormFactors(dge)
+
+# Gene annotation file
+fData <- read.delim(file.path(dir, "annotation/fData.txt"), header = T, row.names = 1)
+geneid <- rownames(dge$counts)
+anno <- fData[geneid,]
+gl <- as.vector(anno$geneNames)
+
+meta <- "Metastasisyes"
+design1 <- model.matrix(~ Metastasis, data = new_pheno)
+head(design1, 5)
+
+v1_2 <- voom(dge, design1, plot = T) 
+fit1_2 <- lmFit(v1_2, design1)
+fit1_2 <- eBayes(fit1_2)
+tt1_2 <- topTable(fit1_2, number=Inf, genelist=gl, coef=meta)
+head(tt1_2, 20)
+volcanoplot(fit1_2, coef=meta, highlight = 4, names=gl)
+plotMA(fit1_2, main = "did not correct for cancer type")
+summary(decideTests(fit1_2)) 
+draw_SigCounts(tt1_2)
+
+```
+
+```{R, fig.height=14, fig.width=14}
+geneList <- rownames(tt1_2[1:3,])
+
+draw_boxplot(dge$counts,tt1_2,new_pheno,geneList[1])
+draw_boxplot(dge$counts,tt1_2,new_pheno,geneList[2])
+draw_boxplot(dge$counts,tt1_2,new_pheno,geneList[3])
+```
+
+```{R, fig.height=14, fig.width=14}
+# Draw the heatmap for the top 100 DEGs from limma-voom results of metastasis v.s. non-metastasis comparison only
+select_gene <- rownames(tt1_2[(tt1_2$adj.P.Val < 0.05 & abs(tt1_2$logFC) > log2(2)),])
+draw_heatmap(v1_2, tt1_2, new_pheno, anno, select_gene)
+```
+
+
+```{R}
+new_pheno$type <- as.vector(new_pheno$type)
+design2_2 <- model.matrix(~ factor(type) + Metastasis, data=new_pheno)
+head(design2_2,3)
+v2_2 <- voom(dge, design2_2, plot = T)
+fit2_2 <- lmFit(v2_2, design2_2)
+fit2_2 <- eBayes(fit2_2)
+tt2_2 <- topTable(fit2_2, number=Inf,genelist = gl, coef=meta)
+head(tt2_2, 20)
+volcanoplot(fit2_2, coef=meta, highlight = 4, names=gl)
+plotMA(fit2_2, main = "correct for cancer type")
+draw_SigCounts(tt2_2)
+
+geneList2_2 <- rownames(tt2_2[1:3,])
+
+```
+
+
+```{R, fig.height=14, fig.width=14}
+draw_boxplot(dge$counts,tt2_2,new_pheno,geneList2_2[1])
+draw_boxplot(dge$counts,tt2_2,new_pheno,geneList2_2[2])
+draw_boxplot(dge$counts,tt2_2,new_pheno,geneList2_2[3])
+
+select_gene2 <- rownames(tt2_2[(tt2_2$adj.P.Val < 0.05 & abs(tt2_2$logFC) > log2(1.2)),])
+draw_heatmap(v2_2, tt2_2, new_pheno, anno, select_gene2)
+```
+
+
+##### The results of tt2_2 were quiet similar to those of tt2 (correct for cancer types without 8 types exclusion).
+
+```{R}
+g_d1 <- rownames(tt1_2[tt1_2$adj.P.Val < 0.05,])
+g_d2 <- rownames(tt2_2[tt2_2$adj.P.Val < 0.05,])
+ven2 <- venn(list(design1=g_d1, design2=g_d2), intersections = T)
+isect2 <- attr(ven2, "intersection")
+d2_only2 <- isect2$design2
+anno[d2_only2,]$geneNames
+tt1_2[d2_only2,]$adj.P.Val
+tt2_2[d2_only2,]$adj.P.Val
+```
+
+
+
+
