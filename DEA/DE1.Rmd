@@ -3,7 +3,7 @@ title: "Limma-voom DE Analysis 1"
 output: html_document
 ---
 
-####### Here using the protein-coding gene subset from previous data processing to conduct differential expression analysis, and also build the main pipeline.
+Here using the protein-coding gene subset from previous data processing to conduct differential expression analysis, and also build the main pipeline.
 
 ```{R setup, include=F}
 library(edgeR)
@@ -24,7 +24,7 @@ cfa <- pcg_txi$countsFromAbundance
 ```
 
 ### Fitler out samples with large proportion of lowly-expressed genes
-####### Here 5 samples which had extremely low library size were filted out, so the sample size would go down from 6125 to 6120.
+Here 5 samples which had extremely low library size were filted out, so the sample size would go down from 6125 to 6120.
 
 ```{R}
 counts <- sort(colSums(cfa))
@@ -88,7 +88,7 @@ meta <- "Metastasisyes"
 design1 <- model.matrix(~ Metastasis, data = new_cdr)
 head(design1, 5)
 ```
-####### The first coefficient estimates the mean log-expression for non-metastasized samples and play the role of an intercept. The second one estimates the difference between meta v.s. non-meta. This approach is equal to (~ 0 + Metastasis) then use contrast matrix [confirmed].
+The first coefficient estimates the mean log-expression for non-metastasized samples and play the role of an intercept. The second one estimates the difference between meta v.s. non-meta. This approach is equal to (~ 0 + Metastasis) then use contrast matrix [confirmed].
 
 ```{R, fig.height=6, fig.width=7}
 v1 <- voom(dge_filt, design1, plot = T) 
@@ -116,7 +116,7 @@ draw_boxplot(dge_filt$counts,tt1,new_cdr,geneList[3])
 ```
 
 
-####### Draw the heatmap for the top 50 DEGs from limma-voom results of metastasis v.s. non-metastasis comparison only.
+ Draw the heatmap for the top 50 DEGs from limma-voom results of metastasis v.s. non-metastasis comparison only.
 ###### Try annotation: 
 
 1. cancer type; 
@@ -197,7 +197,7 @@ dev.off()
 ---
 
 ##### limma-trend
-####### If the sequencing depth is reasonably consistent across the RNA samples. This approach will usually work well if the ratio of the largest library size to the smallest is not more than about 3-fold. It's faster than limma-voom though using more memories.
+If the sequencing depth is reasonably consistent across the RNA samples. This approach will usually work well if the ratio of the largest library size to the smallest is not more than about 3-fold. It's faster than limma-voom though using more memories.
 
 
 ```{R, include = T, eval=F}
