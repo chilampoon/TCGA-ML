@@ -11,7 +11,7 @@ The original files was given from Christine Eng:
 
 
 ### Import dataset
-####### There are total 7572 tumor samples from The Cancer Genome Atlas (TCGA).
+There are total 7572 tumor samples from The Cancer Genome Atlas (TCGA).
 
 ```{R Setup, include=F}
 library(dplyr)
@@ -94,7 +94,7 @@ kable(sec_sum, caption="New new tumor event type", format="markdown")
 
 ### Split the dataset according to biotypes
 ##### First using the GTF file from Ensembl v75 to annotate the ESIDs.
-######## Download the gene annotation GTF file (hg19, release-75) from ENSEMBL [ftp site](ftp://ftp.ensembl.org/pub/release-75/gtf/homo_sapiens/).
+Download the gene annotation GTF file (hg19, release-75) from ENSEMBL [ftp site](ftp://ftp.ensembl.org/pub/release-75/gtf/homo_sapiens/).
 
 ```{bash, gene annotation, eval = F}
 # Process the GTF file
@@ -113,7 +113,7 @@ cat hg19.anno.txt | awk -F'\t' -vOFS="\t" '{print $1,$2,$6,$7,$3}' > fData.txt
 ```
 
 
-####### If using the biomaRt package, the number of protein-coding genes (20459) will be fewer than those in the GTF file (22810), that's because some ESIDs were removed or combined. Here just used the biomaRt to extract coding genes.
+If using the biomaRt package, the number of protein-coding genes (20459) will be fewer than those in the GTF file (22810), that's because some ESIDs were removed or combined. Here just used the biomaRt to extract coding genes.
 
 ```{R}
 # Extract protein-coding genes
@@ -148,7 +148,7 @@ pcg_length <- data.matrix(pcg_length)
 
 ### Store the objects 
 #### Generate gene-level counts-from-abundance from gene-level TPM table
-####### We only have the tximport object using quantification files from Salmon, thus there are only gene-level summarized TPM table and count table from those Salmon files. To implement limma, the count matrix should be scaled first. Here using the `makeCountsFromAbundance()` can achieve this, generating counts-from-abundance from either "scaledTPM" or "lengthScaledTPM". See the posts on bioconductor: [Get the countsFromAbundance as limma input](https://support.bioconductor.org/p/112573/); [difference among tximport scaledTPM, lengthScaledTPM and TPM](https://support.bioconductor.org/p/84883/).
+We only have the tximport object using quantification files from Salmon, thus there are only gene-level summarized TPM table and count table from those Salmon files. To implement limma, the count matrix should be scaled first. Here using the `makeCountsFromAbundance()` can achieve this, generating counts-from-abundance from either "scaledTPM" or "lengthScaledTPM". See the posts on bioconductor: [Get the countsFromAbundance as limma input](https://support.bioconductor.org/p/112573/); [difference among tximport scaledTPM, lengthScaledTPM and TPM](https://support.bioconductor.org/p/84883/).
 
 ```{R}
 # Generate the scaled count matrix
