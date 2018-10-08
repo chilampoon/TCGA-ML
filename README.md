@@ -1,2 +1,3 @@
 # TCGA_ML
-Intern Project
+
+For recording the intern project at GIS.
