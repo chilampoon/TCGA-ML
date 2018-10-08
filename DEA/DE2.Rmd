@@ -5,14 +5,14 @@ output: html_document
 
 According to previous analysis, eight kinds of tumor didn't have any metastatic samples: 
 
--CHOL 
--GBM
--KICH
--KIRC
--KIRP
--LGG
--LIHC
--OV
+- CHOL 
+- GBM
+- KICH
+- KIRC
+- KIRP
+- LGG
+- LIHC
+- OV
 
 ####### Actually some cancer types only had less than 5 metastatic samples: COAD, PCPG, PRAD, READ, SKCM, TGCT, THYM. I tried to excluded those had 0 metastatic sample then apply the limma-voom pipeline to see if the results will be better or not. Temporary using the protein coding gene subset.
 
