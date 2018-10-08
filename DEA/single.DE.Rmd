@@ -31,7 +31,7 @@ m_count <- cdr %>%
 m_count[which(m_count$Metastasis == "yes" & m_count$counts >=10), ]
 ```
 
-####### Tissues with more than 10 metastasis samples:
+Tissues with more than 10 metastasis samples:
 
 - BLCA
 - BRCA
@@ -45,7 +45,7 @@ m_count[which(m_count$Metastasis == "yes" & m_count$counts >=10), ]
 - STAD
 - THCA
 
-####### For each type, firstly devide the cdr file into different cohorts, then use the sample barcode to seperate the cfa matrix, saving in a directory.
+For each type, firstly devide the cdr file into different cohorts, then use the sample barcode to seperate the cfa matrix, saving in a directory.
 
 
 ### Laod processed gene annotation file
