@@ -14,7 +14,7 @@ According to previous analysis, eight kinds of tumor didn't have any metastatic 
 - LIHC
 - OV
 
-####### Actually some cancer types only had less than 5 metastatic samples: COAD, PCPG, PRAD, READ, SKCM, TGCT, THYM. I tried to excluded those had 0 metastatic sample then apply the limma-voom pipeline to see if the results will be better or not. Temporary using the protein coding gene subset.
+Actually some cancer types only had less than 5 metastatic samples: COAD, PCPG, PRAD, READ, SKCM, TGCT, THYM. I tried to excluded those had 0 metastatic sample then apply the limma-voom pipeline to see if the results will be better or not. Temporary using the protein coding gene subset.
 
 ```{R setup, include=F}
 library(edgeR)
@@ -118,7 +118,7 @@ draw_heatmap(v2_2, tt2_2, new_pheno, anno, select_gene2)
 ```
 
 
-##### The results of tt2_2 were quiet similar to those of tt2 (correct for cancer types without 8 types exclusion).
+The results of tt2_2 were quiet similar to those of tt2 (correct for cancer types without 8 types exclusion).
 
 ```{R}
 g_d1 <- rownames(tt1_2[tt1_2$adj.P.Val < 0.05,])
