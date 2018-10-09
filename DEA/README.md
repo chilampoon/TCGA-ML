@@ -44,11 +44,17 @@ Before applying the machine learning algorithms, here we first did a differentia
 
 #### 5. Functional enrichment analysis
  - Conducted pre-ranked GSEA using gene lists ranked by the t-statistics from the results of DE analysis;
- - Evaluation: 
+ - Evaluation: GOseq -- a bit more different terms
 
 ---
 ### Conclusions:
 
+1. The results DEA of single type are strange, there is no DEGs in BRCA or BLCA etc. tissues that have enough sample numbers, so then we can look into what happens here -- check any bugs? draw the boxplot of some top genes ranked by logFC.
 
+2. From the heatmaps, the DEGs (qval<0.05 & FC > 2) of design 1 in PCG subset and ALL gene subset can classify the metastatic and primary tumors better. each can try.
 
+3. Do the classification for 
+   - single cancer type 
+   - pan cancer
 
+One can use the cancer census genes to check if it's a cancer oncogene or suppressor genes
