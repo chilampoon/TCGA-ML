@@ -63,6 +63,6 @@ One can use the cancer census genes to check if it's a cancer oncogene or suppre
 ### To do:
 
 1. Redo the single type DEA, adding PCA analysis.
-2. Extract BRCA & HNSC subsets, first spile into training and validation parts, then to redo the differential expression analysis **on training part**, then to try the machine learning pipeline!
+2. Extract BRCA & HNSC subsets, first spilt into training and validation parts, then to redo the differential expression analysis **on training part**, then to try the machine learning pipeline!
 
 
