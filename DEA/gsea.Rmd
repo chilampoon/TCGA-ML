@@ -1,0 +1,133 @@
+---
+title: "Gene Set Enrichment Analyses"
+author: "Chi-Lam Poon"
+date: "9/13/2018"
+output:
+  html_document: default
+---
+For the coding gene subset with design 1 & design 2.
+
+1. GSEA
+2. GOseq
+3. Ontologizer
+
+---
+### Functional enrichment analysis: perform pre-ranked GSEA 
+Pre-ranked GSEA was conducted on gene lists ranked by the t-statistics from the results of DE analysis.
+
+##### Install java 8
+```{bash install, eval=F}
+### install java 8:
+sudo add-apt-repository ppa:webupd8team/java
+sudo apt-get update
+sudo apt-get install oracle-java8-installer
+# set up enviornment variables:
+sudo vi /etc/environment
+# add the two variables into the file:
+JAVA_HOME=/usr/lib/jvm/java-8-oracle
+JRE_HOME=/usr/lib/jvm/java-8-oracle/jre
+
+source /etc/environment
+echo $JAVA_HOME
+```
+
+Download gsea-3.0.jar & GOBP gmt file from [GSEA download site](http://software.broadinstitute.org/gsea/downloads.jsp) to the desktop, then send to ubuntu. [10 Sep 2018]
+
+```{bash transfer, eval=F}
+# run this command in macOS terminal:
+scp -i ~/.ssh/chilampoon.pem /Users/magicpants/GoogleDrive/panCancer/gsea-3.0.jar ubuntu@sophie_p.genome.sg:/home/ubuntu/storage/GSEA
+
+scp -i ~/.ssh/chilampoon.pem /Users/magicpants/GoogleDrive/panCancer/c5.bp.v6.2.symbols.gmt ubuntu@sophie_p.genome.sg:/home/ubuntu/storage/GSEA/gmt
+```
+
+#### Run the java program:
+
+```{bash, eval=F}
+./run.prerank.sh > run.tt1.log
+
+```
+
+```{bash runGSEAscript, include=F, eval=F}
+###./run.prerank.sh
+
+#!/bin/bash
+
+# For GSEA pre-ranked program
+# Set up file paths
+GSEAHOME=/home/ubuntu/storage/GSEA
+GMT=${GSEAHOME}/gmt
+RNK=${GSEAHOME}/rnk
+OUTPUT=${GSEAHOME}/results
+
+JarFile=${GSEAHOME}/gsea-3.0.jar
+#GMT:
+#c5.bp.v6.2.symbols.gmt 
+
+GmtFile=${GMT}/c5.bp.v6.2.symbols.gmt
+RnkFile=${RNK}/tt1.rnk
+OutFile=${OUTPUT}/tt1
+
+java -cp ${JarFile} -Xmx8192m xtools.gsea.GseaPreranked -gmx ${GmtFile} -rnk ${RnkFile} -out ${OutFile} -norm meandiv -nperm 1000 -scoring_scheme weighted
+
+echo Finish allll
+
+```
+
+---
+
+### GOseq
+
+```{R, eval=T}
+library(goseq)
+tt_dir <- "/home/ubuntu/storage/tcga/dea/whole/table"
+tt1 <- read.delim(file.path(tt_dir,"all.types.d1.txt"), header=T)
+tt2 <- read.delim(file.path(tt_dir,"all.types.d2.txt"), header=T)
+
+# For design 1
+gene_tt1 <- as.integer(tt1$adj.P.Val < 0.05) #ESID or symbols?
+names(gene_tt1) <- row.names(tt1)
+table(gene_tt1)
+pwf1 <- nullp(gene_tt1, "hg19", "ensGene")
+head(pwf1)
+GO.wall1 <- goseq(pwf1, "hg19", "ensGene")
+
+# over-represented terms
+head(GO.wall1, 20)
+
+# under-represented terms
+under1 <- GO.wall1[GO.wall1$under_represented_pvalue %in% head(sort(GO.wall1$under_represented_pvalue),20),]
+under1[rev(rownames(under1)),]
+
+# limit the category
+GO.BP1=goseq(pwf1,"hg19","ensGene",test.cats=c("GO:BP"))
+head(GO.BP1, 20)
+
+# under
+under1_bp <- GO.BP1[GO.BP1$under_represented_pvalue %in% head(sort(GO.BP1$under_represented_pvalue),20),]
+under1_bp[rev(rownames(under1_bp)),]
+
+# For design 2
+gene_tt2 <- as.integer(tt2$adj.P.Val < 0.05) #ESID or symbols?
+names(gene_tt2) <- row.names(tt2)
+table(gene_tt2)
+pwf2 <- nullp(gene_tt2, "hg19", "ensGene")
+head(pwf2)
+GO.wall2 <- goseq(pwf2, "hg19", "ensGene")
+
+# over-represented terms
+head(GO.wall2, 20)
+
+# under-represented terms
+under2 <- GO.wall2[GO.wall2$under_represented_pvalue %in% head(sort(GO.wall2$under_represented_pvalue),20),]
+under2[rev(rownames(under2)),]
+
+# limit the category
+GO.BP2=goseq(pwf2,"hg19","ensGene",test.cats=c("GO:BP"))
+head(GO.BP2, 20)
+
+# under
+under2_bp <- GO.BP2[GO.BP2$under_represented_pvalue %in% head(sort(GO.BP2$under_represented_pvalue),20),]
+under2_bp[rev(rownames(under2_bp)),]
+
+```
+
