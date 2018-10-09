@@ -58,3 +58,11 @@ Before applying the machine learning algorithms, here we first did a differentia
    - pan cancer
 
 One can use the cancer census genes to check if it's a cancer oncogene or suppressor genes
+
+---
+To do:
+
+1. Redo the single type DEA, adding PCA analysis.
+2. Extract BRCA & HNSC subsets, first to redo the differential expression analysis, then to try the machine learning pipeline!
+
+
