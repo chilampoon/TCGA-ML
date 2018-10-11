@@ -19,7 +19,7 @@ Before applying the machine learning algorithms, here we first did a differentia
 
 ### Main steps
 
-#### 1. Filtering
+#### 1. Filt samples
 - Discard patients with multiple metastatic sites;
 - Keep primary tumor samples only.
  
@@ -30,10 +30,13 @@ Before applying the machine learning algorithms, here we first did a differentia
 #### 3. Generate gene-level counts-from-abundance
 - Scale the count matrix for afterward limma-voom implementation
 
-#### 4. Limma-voom 
-##### 4-1. For protein-coding genes pancancer subset
-##### 4-2. For all genes pancancer set
-##### 4-3. Implement limma-voom in cancer types with more than 10 metastasis samples for coding gene subsets
+#### 4. Filter genes
+Since different gene filtering ways cause different DE results, and some types don't have metastasis samples or just 1-5 samples. Also I set up the DE metastatic sample threshold is 10, therefore here using the `keep <- rowSums(cpm(cfa) > 1) > 5` where the 5 is 10/2.
+
+#### 5. Limma-voom 
+##### 5-1. For protein-coding genes pancancer subset
+##### 5-2. For all genes pancancer set
+##### 5-3. Implement limma-voom in cancer types with more than 10 metastasis samples for coding gene subsets
 - Fitler out samples with large proportion of lowly-expressed genes (outliers);
 - Remove lowly-expressed genes using functions in DESeq2 & edgeR;
 - Normalize the counts using TMM method;
@@ -42,7 +45,7 @@ Before applying the machine learning algorithms, here we first did a differentia
   - design2: ~ Metastasis + type (adding the confounding factor cancer type)
 - Draw boxplots with top several DEGs for each cancer type and heatmap using 30 DEGs (q-vals and logFC threshold see the file).
 
-#### 5. Functional enrichment analysis
+#### 6. Functional enrichment analysis
  - Conducted pre-ranked GSEA using gene lists ranked by the t-statistics from the results of DE analysis;
  - Evaluation: GOseq -- a bit more different terms
 
