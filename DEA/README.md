@@ -31,12 +31,13 @@ Before applying the machine learning algorithms, here we first did a differentia
 - Scale the count matrix for afterward limma-voom implementation
 
 ###### Filter genes
-Since different gene filtering ways cause different DE results, and some types don't have metastasis samples or just 1-5 samples. Also I set up the DE metastatic sample threshold is 10, therefore here using the `keep <- rowSums(cpm(cfa) > 1) > 5` where the 5 is 10/2.
+Since different gene filtering ways cause different DE results, and some types don't have metastasis samples or just 1-5 samples. Here using the `keep <- rowSums(cpm(cfa) > 1) > 7` where the 7 is 14/2, half of the smallest tissue sample size.
 
 #### 4. Limma-voom 
 ##### 4-1. For protein-coding genes pancancer subset
 ##### 4-2. For all genes pancancer set
 ##### 4-3. Implement limma-voom in cancer types with more than 10 metastasis samples for coding gene subsets
+- Remove samples with low library size (5)
 - Remove lowly-expressed genes using functions in DESeq2 & edgeR
 - Normalize the counts using TMM method
 - Voom and limma:
@@ -64,7 +65,8 @@ One can use the cancer census genes to check if it's a cancer oncogene or suppre
 ---
 ### To do:
 
-1. Redo the single type DEA, adding PCA analysis.
+1. Redo the single type DEA, using single filtered all gene sets. -- done yet to run
+1.5 Redo the all gene set DEA using filtered all gene sets --> yet to run
 2. Extract BRCA & HNSC subsets, first spilt into training and validation parts, then to redo the differential expression analysis **on training part**, then to try the machine learning pipeline!
 
 
