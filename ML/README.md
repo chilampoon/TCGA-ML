@@ -22,8 +22,11 @@ Since there is another extra TCGA dataset, this 6k dataset can be used as a whol
     - Design 2: ~ Metastasis + Type
     
   After DEA, there are several available DEG sets:
+  
     1) q<0.1 & FC > 1.5 in design 1 only
+    
     2) q<0.1 & FC > 1.5 in design 2 only
+    
     3) the overlapped subset between design 1 & 2 (q<0.1 & FC > 1.5 || q < 0.1 only)
 
 Get different gene esID list as features.
