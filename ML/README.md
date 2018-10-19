@@ -17,7 +17,7 @@ To do：
 
 Since there is another extra TCGA dataset, this 6k dataset can be used as a whole training part. 
 
-1. Do differential expression analysis using filtered all gene set:
+1. Do differential expression analysis using 1) filtered all gene set; 2) filtered PCG set for
     - Design 1: ~ Metastasis
     - Design 2: ~ Metastasis + Type
     
