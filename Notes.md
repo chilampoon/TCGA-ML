@@ -1,19 +1,5 @@
 # Notes
 
-### Update R version (3.4 -> 3.5) in Ubuntu 16.04
-
-```
-sudo su
-echo "deb https://cloud.r-project.org/bin/linux/ubuntu xenial-cran35/" >> /etc/apt/sources.list
-apt-key adv --keyserver keyserver.ubuntu.com --recv-keys E084DAB9
-apt-get update
-apt-get install r-base
-apt-get install r-base-dev
-```
-Remember to check the Ubuntu version name using `sudo lsb_release -a`
-
-See [CRAN](https://cran.r-project.org/bin/linux/ubuntu/) also.
-
 ### Locale setting
 ```
 sudo -i
@@ -27,6 +13,31 @@ or
 echo "export LANGUAGE=en_US.UTF-8" >> ~/.bashrc
 echo "export LC_ALL=en_US.UTF-8" >> ~/.bashrc
 ```
+
+### Upgrade RStudio Server
+
+```
+sudo /usr/sbin/rstudio-server stop #stop the current version
+# Download
+sudo apt-get install gdebi-core
+wget https://download2.rstudio.org/rstudio-server-1.1.463-amd64.deb
+sudo gdebi rstudio-server-1.1.463-amd64.deb
+```
+
+
+### Update R version (3.4 -> 3.5) in Ubuntu 16.04
+
+```
+sudo su
+echo "deb https://cloud.r-project.org/bin/linux/ubuntu xenial-cran35/" >> /etc/apt/sources.list
+apt-key adv --keyserver keyserver.ubuntu.com --recv-keys E084DAB9
+apt-get update
+apt-get install r-base
+apt-get install r-base-dev
+```
+Remember to check the Ubuntu version name using `sudo lsb_release -a`
+
+See [CRAN](https://cran.r-project.org/bin/linux/ubuntu/) also.
 
 
 ### Download AWS s3 bucket objects
