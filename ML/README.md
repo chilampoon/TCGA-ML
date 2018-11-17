@@ -29,23 +29,27 @@ Since there is another extra TCGA dataset, this 6k dataset can be used as a whol
     - 5-fold cross validation
     - reduce the gene numbers or not
 
-##### To be completed:
-1. Select feature set 2, 4, 5 to test the performance in the 
+3. Select feature set 2, 4, 5 to test the performance in the 
     - whole dataset excluding training data (all are non-metastatic samples)
     - every single cancer type 
-
-2. Select top genes with high coefficients in lasso regression in results from 1, then do ROC tests
+    
 
 #### Results:
 
 The performance of these 6 feature sets are not quite well, so I will try to do feature engineering and then try other ML algorithms like random forest which can take tissues into consideration.
 
----
 
-## Feature engineering
 
-### GO terms as features
+# To Do:
 
-Since the enrichment analysis is often followed by differential expression analyses, we can use the top GO terms list, sum up the count values of gene in those gene lists.
+1. Redo the preprocessing and differential expression analyses using the `~ Metastasis + Type` design matrix
+2. Implement *glmnet* to the undersampled whole dataset and every individual tumor type **using log2(TPM + 1)**
+3. Plot the performances
+4. GOseq analysis using esIDs-GOterms `gene2Cat`
+5. Plot the TPM desity/distribution plots
+6. Sum up the TPM values in GOterms, then redo the *glmnet* and apply to *random forest* using new features
+7. Try xgboost, and other algorithms and other feature engineering methods!
+
+
 
 
