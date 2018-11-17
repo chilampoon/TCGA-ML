@@ -48,7 +48,7 @@ The performance of these 6 feature sets are not quite well, so I will try to do 
 4. GOseq analysis using esIDs-GOterms `gene2Cat`
 5. Plot the TPM desity/distribution plots
 6. Sum up the TPM values in GOterms, then redo the *glmnet* and apply to *random forest* using new features
-7. Try xgboost, and other algorithms and other feature engineering methods!
+7. Try *xgboost*, *SVM* and other algorithms and other feature engineering methods!
 
 
 
