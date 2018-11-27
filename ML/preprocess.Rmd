@@ -1,0 +1,219 @@
+---
+title: "Preprocess Dataset"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+The original files were from Christine:
+
+1. Tximport object: `SalmonTXI_TCGA.rds`
+2. Patient information file: `tcga-cdr.csv`
+3. Sample information: `sample.info.tsv`
+
+```{R Setup, include=F}
+library(dplyr)
+library(data.table)
+library(tidyverse)
+library(knitr)
+library(tximport)
+```
+
+#### Load datasets
+There are total 7572 tumor samples from The Cancer Genome Atlas (TCGA).
+
+```{R Import}
+dir <- "/home/ubuntu/hdd/tcga"
+cdr <- read.csv(file.path(dir,"clinic/tcga-cdr.csv"), header = T, row.names = 1)
+sample_info <- read.csv(file.path(dir,"clinic/sample.info.tsv"), sep = "\t", header = T)
+txi <- readRDS(file.path(dir,"txi.split/SalmonTXI_TCGA.rds"))
+```
+
+#### Filtering
+1. Discard patients with multiple metastatic sites, which means they might have multiple metastatic tumors.  
+2. Keep primary tumor samples only.
+
+```{R}
+# All new tumor types:
+type_summary <- cdr %>% 
+  select(bcr_patient_barcode, new_tumor_event_type) %>%
+  group_by(new_tumor_event_type) %>%
+  summarise(n = n()) 
+type_summary <- type_summary[rev(order(type_summary$n)),]
+print(kable(type_summary, caption="New tumor event type", format="markdown"))
+# Filt:
+filt_cdr <- cdr[cdr$new_tumor_event_type %in% c("#N/A", "Distant Metastasis", "Metastatic"),]
+
+```
+
+Select primary tumors (01 at the fourth substring in the barcode)
+[Reading barcodes](https://docs.gdc.cancer.gov/Encyclopedia/pages/TCGA_Barcode/)
+
+```{R}
+# Select those with 01
+sp_id <- strsplit(colnames(txi$abundance), "[-]") 
+sp2 <- gsub("[A-Z]","",unlist(lapply(sp_id, '[[', 4)))
+id_01 <- colnames(txi$abundance)[which(sp2=="01")] 
+pat_id01 <- gsub('-...-...-....-..$', '', id_01)
+two_id01 <- data.frame(id_01,pat_id01)
+commonID <- intersect(filt_cdr$bcr_patient_barcode, pat_id01) #6125 patients
+f_twoID01 <- subset(two_id01, pat_id01 %in% commonID) #6152 samples (dozens of duplicated samples from different vials)
+f_twoID01 <- f_twoID01[!duplicated(f_twoID01$pat_id01),] # exclude duplicated ones
+dim(f_twoID01)
+txi$abundance <- as.data.frame(txi$abundance)[,as.vector(f_twoID01$id_01)]
+txi$counts <- as.data.frame(txi$counts)[,as.vector(f_twoID01$id_01)]
+txi$length <- as.data.frame(txi$length)[,as.vector(f_twoID01$id_01)]
+dim(txi$abundance)
+
+# Filter patient info dataframe:
+filt_cdr <- subset(filt_cdr, filt_cdr$bcr_patient_barcode %in% f_twoID01$pat_id01)
+filt_cdr <- filt_cdr %>% mutate(Metastasis = c(0, 1)[(new_tumor_event_type %in% c("Distant Metastasis", "Metastatic"))+1] )
+filt_cdr$Metastasis <- factor(filt_cdr$Metastasis)
+table(filt_cdr$Metastasis)
+dim(filt_cdr)
+sec_sum <- filt_cdr %>%
+  select(bcr_patient_barcode, new_tumor_event_type) %>%
+  group_by(new_tumor_event_type) %>%
+  summarise(n = n()) %>%
+  mutate(freq = n / sum(n))
+sec_sum <- sec_sum[rev(order(sec_sum$n)),]
+kable(sec_sum, caption="New new tumor event type", format="markdown")
+```
+
+### Split the dataset according to biotypes
+##### First using the GTF file from Ensembl v75 to annotate the ESIDs.
+Download the gene annotation GTF file (hg19, release-75) from ENSEMBL [ftp site](ftp://ftp.ensembl.org/pub/release-75/gtf/homo_sapiens/).
+
+```{bash, gene annotation, eval = F}
+# Download
+wget ftp://ftp.ensembl.org/pub/release-75/gtf/homo_sapiens/Homo_sapiens.GRCh37.75.gtf.gz
+
+# Process the GTF file
+gunzip Homo_sapiens.GRCh37.75.gtf.gz 
+cat Homo_sapiens.GRCh37.75.gtf | grep -v ^# | awk -F'\t' '{if($3 == "gene") print $0}' > gene.hg19.gtf
+wc -l gene.hg19.gtf
+# 63677 gene.hg19.gtf
+cat gene.hg19.gtf | sed -E 's/(.*gene_id ")([^"]*)(.*gene_name ")([^"]*)/\2\t\4\t\0/g' | cut -f1-7 > hg19.anno.txt
+sed -i '1i ESID\tgeneNames\tchr\tbiotype\tgene\tstart\tend' hg19.anno.txt
+head -3 hg19.anno.txt
+#ESID	geneNames	chr	biotype	gene	start	end
+#ENSG00000223972	DDX11L1	1	pseudogene	gene	11869	14412
+#ENSG00000227232	WASH7P	1	pseudogene	gene	14363	29806
+cat hg19.anno.txt | awk -F'\t' -vOFS="\t" '{print $1,$2,$6,$7,$3}' > fData.txt
+rm hg19.anno.txt gene.hg19.gtf Homo_sapiens.GRCh37.75.gtf 
+```
+
+
+If using the biomaRt package, the number of protein-coding genes (20459) will be fewer than those in the GTF file (22810), that's because some ESIDs were removed or combined. Here just used the biomaRt to extract coding genes.
+
+```{R}
+# Extract protein-coding genes
+library(biomaRt)
+listMarts()
+ensembl <- useMart("ensembl", dataset="hsapiens_gene_ensembl")
+# Annotate
+pcg <- getBM(mart=ensembl,
+             attributes=c("ensembl_gene_id", "gene_biotype"),
+             filters=c("biotype"),
+             values=list("protein_coding"))
+dim(pcg) 
+```
+
+
+```{R}
+# Extract protein coding genes
+commonGene <- intersect(rownames(txi$abundance), pcg$ensembl_gene_id)
+length(commonGene) 
+pcg_abundance <- txi$abundance[commonGene,] 
+pcg_counts <- txi$counts[commonGene,]
+pcg_length <- txi$length[commonGene,]
+dim(pcg_abundance)
+pcg_abundance <- data.matrix(pcg_abundance)
+pcg_counts <- data.matrix(pcg_counts)
+pcg_length <- data.matrix(pcg_length)
+```
+
+
+### Store the objects 
+#### Generate gene-level counts-from-abundance from gene-level TPM table
+We only have the tximport object using quantification files from Salmon, thus there are only gene-level summarized TPM table and count table from those Salmon files. To implement limma, the count matrix should be scaled first. Here using the `makeCountsFromAbundance()` can achieve this, generating counts-from-abundance from either "scaledTPM" or "lengthScaledTPM". See the posts on bioconductor: [Get the countsFromAbundance as limma input](https://support.bioconductor.org/p/112573/); [difference among tximport scaledTPM, lengthScaledTPM and TPM](https://support.bioconductor.org/p/84883/).
+
+```{R}
+# Generate the scaled count matrix
+pcg_cfa <- tximport:::makeCountsFromAbundance(pcg_counts, pcg_abundance, pcg_length, countsFromAbundance = "lengthScaledTPM") 
+pcg_txi <- list("abundance" = pcg_abundance,
+                "counts" = pcg_counts,
+                "length" = pcg_length,
+                "countsFromAbundance" = pcg_cfa)
+
+###################################################
+#Note that the scaled count matrix is stored as pcg_txi$countsFromAbundance, so the pcg_txi$count is still the original count matrix from Salmon file.
+###################################################
+
+txi$abundance <- data.matrix(txi$abundance)
+txi$counts <- data.matrix(txi$counts)
+txi$length <- data.matrix(txi$length)
+txi[["countsFromAbundance"]] <- tximport:::makeCountsFromAbundance(txi$counts, txi$abundance, txi$length, countsFromAbundance = "lengthScaledTPM") 
+
+# Save the tximport object after filtering
+saveRDS(pcg_txi, file = file.path(dir,"txi.split/pcg.txi.rds")) # coding gene subset
+saveRDS(txi, file = file.path(dir,"txi.split/filted.txi.rds")) # all gene set
+
+# Save the colData: 
+colnames(f_twoID01) <- c("sample_barcode","bcr_patient_barcode")
+new_filtcdr <- merge(f_twoID01,filt_cdr,by = "bcr_patient_barcode") 
+rownames(new_filtcdr) <- new_filtcdr$sample_barcode
+new_filtcdr <- new_filtcdr[match(colnames(txi$abundance),new_filtcdr$sample_barcode),]
+write.csv(new_filtcdr, file=file.path(dir,"clinic/new.filt.cdr.csv")) # DON'T USE quote=F
+```
+
+
+```{R, include = T, eval = F}
+## The code for tximport:::makeCountsFromAbundance, copied from https://github.com/mikelove/tximport/blob/d4f8f31cb7d03373b1f4a3f37bb500912eea9779/R/helper.R
+#' Low-level function to make counts from abundance using matrices
+#'
+#' Simple low-level function used within \link{tximport} to generate
+#' \code{scaledTPM} or \code{lengthScaledTPM} counts, taking as input
+#' the original counts, abundance and length matrices.
+#' NOTE: This is a low-level function exported in case it is needed for some reason,
+#' but the recommended way to generate counts-from-abundance is using
+#' \link{tximport} with the \code{countsFromAbundance} argument.
+#'
+#' @param countsMat a matrix of original counts
+#' @param abundanceMat a matrix of abundances (typically TPM)
+#' @param lengthMat a matrix of effective lengths
+#' @param countsFromAbundance the desired type of count-from-abundance output
+#'
+#' @return a matrix of count-scale data generated from abundances.
+#' for details on the calculation see \link{tximport}.
+#'
+#' @export
+makeCountsFromAbundance <- function(countsMat, abundanceMat, lengthMat,
+                                    countsFromAbundance=c("scaledTPM","lengthScaledTPM")) {
+  countsFromAbundance <- match.arg(countsFromAbundance)
+  countsSum <- colSums(countsMat)
+  if (countsFromAbundance == "lengthScaledTPM") {
+    newCounts <- abundanceMat * rowMeans(lengthMat)
+  } else if (countsFromAbundance == "scaledTPM") {
+    newCounts <- abundanceMat
+  } else {
+    stop("expecting 'lengthScaledTPM' or 'scaledTPM'")
+  }
+  newSum <- colSums(newCounts)
+  countsMat <- t(t(newCounts) * (countsSum/newSum))
+  countsMat
+}
+```
+
+
+##### Match the sample information
+
+```{R}
+# check the sample types
+sample_new <- unique(sample_info[,c("barcode", "disease", "disease_name", "sample_type", "tss_id", "state")])
+dim(sample_new)
+share_id <- intersect(f_twoID01$sample_barcode, sample_new$barcode)
+sample_new2 <- subset(sample_new, sample_new$barcode %in% share_id)
+table(sample_new2$sample_type)
+write.table(sample_new2, file=file.path(dir,"clinic/new.sample.info.txt"), quote = F, row.names = F, sep = "\t")
+```
