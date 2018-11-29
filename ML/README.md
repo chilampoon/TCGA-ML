@@ -42,7 +42,9 @@ The performance of these 6 feature sets are not quite well, so I will try to do 
 
 # To Do:
 
-1. Redo the preprocessing and differential expression analyses using the `~ Metastasis + Type` design matrix
+1. ~~Redo the preprocessing and differential expression analyses using the `~ Metastasis + Type` design matrix~~ (done)
+2.0 Try to utilize all `y=0` samples (rotation?)
+2.1 Add tissue type dummy variables into glmnet matrix
 2. Implement *glmnet* to the undersampled whole dataset and every individual tumor type **using log2(TPM + 1)**
 3. Plot the performances
 4. GOseq analysis using esIDs-GOterms `gene2Cat`
