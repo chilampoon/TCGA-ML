@@ -1,0 +1,255 @@
+---
+title: "Differential Expression Analysis using limma-voom"
+output: html_document
+---
+
+```{R set up, include=F}
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(edgeR)
+library(venn)
+source("/home/rstudio/tcga/plot.func.R")
+```
+
+### Load data – ALL set
+```{R}
+txi_dir <- "/home/ubuntu/hdd/tcga/txi.split"
+cdr_dir <- "/home/ubuntu/hdd/tcga/clinic"
+cfa <- readRDS(file.path(txi_dir,"all.cfa.rds"))
+cdr <- read.csv(file.path(cdr_dir,"new.filt.cdr.csv"), header = T, row.names = 1)
+```
+
+Situations listed as following:
+
+For each dataset, different feature lists should be used:
+
+1. DEGs with q<0.1 & FC > 1.5 in design 1 only (2656)
+
+2. DEGs with q<0.1 & FC > 3 in design 1 only (556)
+
+3. DEGs with q<0.1 in design 2 only (1256)
+
+4. DEGs with q<0.1 & FC > 1.2 in design 2 only (380)
+
+5. Overlapped subset between design 1 & 2 (q<0.1 only) (993)
+
+6. Overlapped subset between design 1 & 2 (q<0.1 & FC > 1.2) (203)
+
+…
+
+### Cohort demography
+
+##### Sample numbers in each cancer type
+```{R}
+cdr$Metastasis <- factor(cdr$Metastasis) # set 0 & 1 as factor
+
+t_count <- cdr %>% group_by(type) %>% summarise(counts = n())
+
+ggplot(t_count, aes(x = type, y = counts)) +
+  geom_bar(stat = "identity", fill = "tomato") +
+  scale_x_discrete(limits=rev(levels(t_count$type))) +
+  scale_y_continuous(limits=c(0,1050), expand = c(0.02,0)) +
+  geom_text(aes(label= counts), vjust=0.22, hjust=-0.25, size=2.7) + coord_flip() +
+  labs(title="Sample numbers in each cancer type", x="", y="sample #") +
+  theme_bw()
+
+# Metastasized by cancer type
+m_count1 <- cdr %>% group_by(Metastasis) %>% summarise(counts = n())
+m_count2 <- cdr %>% group_by(type, Metastasis) %>% summarise(counts = n())
+mp1 <- ggplot(m_count1, aes(x=Metastasis, y=counts, fill=Metastasis)) +
+  geom_bar(stat = "identity") + geom_text(aes(label=counts)) +
+  theme_minimal() + theme(axis.title.x=element_blank()) +
+  scale_fill_manual(values = c("#56B4E9", "#E69F00"))
+
+mp2 <- ggplot(m_count2, aes(x = Metastasis, y = counts, fill = Metastasis)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label=counts),vjust = 0.5, size=3.2) +
+  theme_minimal() +
+  theme(axis.title.x=element_blank(),
+      axis.text.x=element_blank(),
+      axis.title.y=element_blank()) +
+  scale_fill_manual(values = c("#56B4E9", "#E69F00")) +
+  facet_wrap(~type,ncol=5)
+
+ggarrange(mp1, mp2, ncol=2, nrow=1, widths=c(1,3), common.legend = T, legend = "right")
+  
+```
+
+### Remove lowly-expressed genes
+Keep the genes expressed larger than 1 cpm and in at least 7 samples(CHOL, the fewest sample size is 14), refering to the tissue-aware filtering method in YARN and a step in this pipeline.
+
+```{R}
+# Create dge object
+dge <- DGEList(cfa)
+keep <- rowSums(cpm(cfa) > 1) >= 7 # the cfa is scaled read counts
+table(keep) # delete 26021
+
+dge_filt <- dge[keep, ]
+
+# Draw density plot
+lcpm <- cpm(dge, log=T)
+lcpm_f <- cpm(dge_filt, log=T)
+nsamples <- ncol(dge)
+dp_col <- get_colVector(nsamples)
+par(mfrow=c(1,2), las=1)
+draw_densityPlot(lcpm, dp_col, nsamples)
+
+draw_densityPlot(lcpm_f, dp_col, nsamples)
+```
+### Normalize
+Information about TMM: biostar post; google groups
+
+```{R}
+# Apply TMM normalization method (optional...)
+dge_filt <- calcNormFactors(dge_filt)
+
+# Draw boxplots to see the effect, using 20 samples.
+col_box <- get_colVector(20)
+boxplot(lcpm_f[,1:20], las=2, col=col_box, main="log-CPM before normalization")
+
+lcpm_f <- cpm(dge_filt, log=T)
+boxplot(lcpm_f[,1:20], las=2, col=col_box, main="log-CPM after TMM normalization")
+```
+
+### Laod processed gene annotation file
+```{R}
+fData <- read.delim("/home/ubuntu/hdd/tcga/fData.txt", header = T, row.names = 1)
+anno <- fData[rownames(dge_filt$counts),]
+gl <- as.vector(anno$geneNames)
+
+# biotypes of these 30k genes
+# suppressMessages(library(knitr))
+# bt_gene <- anno %>% group_by(biotype) %>% summarise(n=n()) %>% mutate(freq=(n/sum(n))*100)
+# bt_gene <- bt_gene[rev(order(bt_gene$n)),]
+# kable(bt_gene, caption="biotypes", format="markdown")
+```
+
+### Apply limma-voom pipeline
+1. Design 1: ~ Metastasis
+
+```{R}
+meta <- "Metastasis1"
+design1 <- model.matrix(~ Metastasis, data = cdr)
+head(design1, 5)
+```
+The first coefficient estimates the mean log-expression for non-metastasized samples and play the role of an intercept. The second one estimates the difference between meta v.s. non-meta. This approach is equal to (~ 0 + Metastasis) then use contrast matrix [confirmed].
+
+```{R, fig.height=6, fig.width=7}
+# Apply limma-voom pipeline
+v1 <- voom(dge_filt, design1, plot = T)
+fit1 <- lmFit(v1, design1)
+fit1 <- eBayes(fit1)
+tt1 <- topTable(fit1, number=Inf, genelist=gl, coef=meta)
+head(tt1, 10)
+volp1 <- volcanoplot(fit1, coef=meta, highlight = 6, names=gl, main="design 1")
+map1 <- plotMA(fit1, main = "Design1 ")
+summary(decideTests(fit1)) 
+plot(density(tt1$logFC), col="skyblue", lwd=3, main="logFC density (design 1)",xlab="logFC")
+```
+
+### Heatmaps
+```{R, fig.height=14, fig.width=14}
+select_gene1 <- rownames(tt1[(tt1$adj.P.Val < 0.1) & abs(tt1$logFC) > log2(1.5),])
+# top 50 in the 2671 set
+h1 <- draw_heatmap(v1, tt1, cdr, anno, select_gene1[1:50])
+
+select_gene2 <- rownames(tt1[(tt1$adj.P.Val < 0.1 & abs(tt1$logFC) > log2(3)),])
+# top 50 in the 73 set
+h2 <- draw_heatmap(v1, tt1, cdr, anno, select_gene2[1:50])
+```
+
+### Savings
+```{R}
+tt_dir <- "/home/ubuntu/hdd/tcga/dea/ttables"
+write.table(tt1, file.path(tt_dir,"tt.design1.txt"), col.names=T, row.names=T, sep="\t", quote=F)
+
+fs_dir <- "/home/ubuntu/hdd/tcga/machines/features/deg"
+
+## features 1 -- DEGs with q<0.1 & FC > 1.5 in design 1 only 2671
+write.table(rownames(tt1[(tt1$adj.P.Val < 0.1 & abs(tt1$logFC) > log2(1.5)),]), file.path(fs_dir,"feature.1.list"), quote=F, col.names = F, row.names = F)
+
+## features II -- DEGs with q<0.1 & FC > 3 in design 1 only 73
+write.table(rownames(tt1[(tt1$adj.P.Val < 0.1 & abs(tt1$logFC) > log2(3)),]), file.path(fs_dir,"feature.2.list"), quote=F, col.names = F, row.names = F)
+```
+
+2. Design 1: ~ Metastasis + type
+Adding the type confounding factor here, is to eliminate the differences between cancer types, thus the results are “closer” to the true differences between metastasis and non-metastasis.
+
+```{R, fig.height=6, fig.width=7}
+design2 <- model.matrix(~ Metastasis + type, data = cdr)
+head(design2, 3)
+
+v2 <- voom(dge_filt, design2, plot=T)
+fit2 <- lmFit(v2, design2)
+fit2 <- eBayes(fit2)
+tt2 <- topTable(fit2, number=Inf, genelist=gl, coef=meta)
+head(tt2, 10)
+
+volp2 <- volcanoplot(fit2, coef=meta, highlight = 6, names=gl, main="desing 2")
+map2 <- plotMA(fit2, main="design 2")
+plot(density(tt2$logFC), col="steelblue", lwd=3, main="logFC density (design 2)",xlab="logFC")
+```
+
+### Draw significant DEG counts in tt1 & tt2
+```{R}
+draw_SigCounts2 <- function(ttable){
+  sig_table <- data.frame(
+    thres = c("qval<0.1", "qval<0.1 & FC > 1.2", "qval<0.1 & FC > 1.5"),
+    counts = c(nrow(ttable[ttable$adj.P.Val < 0.1,]),
+               nrow(ttable[(ttable$adj.P.Val < 0.1 & abs(ttable$logFC) > log2(1.2)),]),
+               nrow(ttable[(ttable$adj.P.Val < 0.1 & abs(ttable$logFC) > log2(1.5)),])))
+
+  p <- ggplot(data=sig_table, aes(x=thres, y=counts, fill=thres)) +
+    geom_bar(stat="identity", width=0.5) +
+    geom_text(aes(label=counts), vjust=-0.2, color="black",
+              position = position_dodge(0.9), size=3.5) +
+    scale_fill_brewer(palette="Dark2",direction = -1) +
+    guides(fill=FALSE) +
+    labs(x="Threshold", y="DEG numbers") +
+    theme_bw()
+  p
+}
+draw_SigCounts(tt1)
+draw_SigCounts2(tt2)
+```
+
+### Heatmaps
+```{R, fig.height=14, fig.width=14}
+select_gene1_2 <- rownames(tt2[tt2$adj.P.Val < 0.1,])
+# top 50 in the 1115 set
+h1_2 <- draw_heatmap(v2, tt2, cdr, anno, select_gene1_2[1:50])
+
+select_gene2_2 <- rownames(tt2[(tt2$adj.P.Val < 0.1 & abs(tt2$logFC) > log2(1.2)),])
+# top 50 in the 365 set
+h2_2 <- draw_heatmap(v2, tt2, cdr, anno, select_gene2_2[1:50])
+```
+
+### Savings
+```{R}
+write.table(tt2, file.path(tt_dir,"tt.design2.txt"), col.names=T, row.names=T, sep="\t", quote=F)
+
+## feture 3. DEGs with q<0.1 in design 2 only 1256
+write.table(rownames(tt2[tt2$adj.P.Val < 0.1,]), file.path(fs_dir,"feature.3.list"), quote=F, col.names = F, row.names = F)
+## features IV -- DEGs with q<0.1 & FC > 1.2 in design 2 only 380
+write.table(rownames(tt2[(tt2$adj.P.Val < 0.1 & abs(tt2$logFC) > log2(1.2)),]), file.path(fs_dir,"feature.4.list"), quote=F, col3.names = F, row.names = F)
+
+## Overlapped DEG sets between two designs
+
+# V. Overlapped subset between design 1 & 2 (q<0.1 only) 880
+gene_d1 <- rownames(tt1[tt1$adj.P.Val < 0.1,])
+gene_d2 <- rownames(tt2[tt2$adj.P.Val < 0.1,])
+ven1 <- venn(list(design1=gene_d1, design2=gene_d2), intersections = T)
+isect1 <- attr(ven1, "intersection")
+
+# VI. Overlapped subset between design 1 & 2 (q<0.1 & FC > 1.2) 201
+gene_d1_2 <- rownames(tt1[(tt1$adj.P.Val < 0.1) & (tt1$logFC > log2(1.2)),])
+gene_d2_2 <- rownames(tt2[(tt2$adj.P.Val < 0.1) & (tt2$logFC > log2(1.2)),])
+ven2 <- venn(list(design1=gene_d1_2, design2=gene_d2_2), intersections = T)
+isect2 <- attr(ven2, "intersection")
+
+# Savings
+write.table(isect1$`design1:design2`, file.path(fs_dir,"feature.5.list"), quote=F, col.names = F, row.names = F)
+
+write.table(isect2$`design1:design2`, file.path(fs_dir,"feature.6.list"), quote=F, col.names = F, row.names = F)
+```
