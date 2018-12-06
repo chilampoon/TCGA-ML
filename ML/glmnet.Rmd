@@ -1,0 +1,229 @@
+---
+title: "glmnet"
+output: html_document
+---
+
+```{R set up, include=F}
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(caTools)
+library(caret)
+library(glmnet)
+library(pROC)
+library(FSelector)
+library(sda)
+source("/home/rstudio/tcga/plot.func.R")
+```
+
+### Cross-validation on different feature sets
+
+#### Preparation
+```{R}
+# Get the filtered tpm table & cdr first (6125 subjects)
+txi <- readRDS("/home/ubuntu/hdd/tcga/txi.split/filted.txi.rds")
+tpm <- txi[["abundance"]]
+cdr <- read.csv("/home/ubuntu/hdd/tcga/clinic/new.filt.cdr.csv", header = T, row.names = 1)
+
+# Merge tpm table and labels
+tpm <- as.data.frame(t(tpm))
+tpm$sample_barcode <- rownames(tpm)
+dataset <- merge(tpm, cdr[ ,c(2,3,35)], by="sample_barcode") # sample_barcode & Metastasis columns in cdr
+dataset$Metastasis <- as.factor(dataset$Metastasis)
+
+# For validation later
+valid <- dataset
+valid_labels <- valid$Metastasis
+
+# Load the DEG feature sets
+fs_dir <- "/home/ubuntu/hdd/tcga/machines/features/deg"
+featureSets <- list()
+for(x in 3:6){ # excluded 1 & 2
+  set <- read.delim(file.path(fs_dir, paste0("feature.", x, ".list")), header = F)
+  featureSets[[as.character(x)]] <- as.vector(set$V1)
+}
+
+
+# Ensemble different resampled datasets
+all_noM <- dataset %>% filter(Metastasis==0)
+train_M <- dataset %>% filter(Metastasis==1)
+set.seed(77)
+
+trainlists <- list()
+t <- 1
+while(t < 12){
+  sample <- sample.split(all_noM$sample_barcode, SplitRatio=nrow(train_M)/nrow(all_noM))
+  train_noM <- subset(all_noM, sample==T)
+  all_noM <- subset(all_noM, sample==F)
+  trainlists[[as.character(t)]] <- list()
+  trainlists[[as.character(t)]]$tpm <- rbind(train_M, train_noM)
+  trainlists[[as.character(t)]]$labels <- as.data.frame(trainlists[[as.character(t)]]$tpm$Metastasis)
+  colnames(trainlists[[as.character(t)]]$labels) <- "label"
+  t <- t + 1
+}
+
+trainlists[[as.character(12)]] <- list()
+trainlists[[as.character(12)]]$tpm <- rbind(train_M, all_noM)
+trainlists[[as.character(12)]]$labels <- as.data.frame(trainlists[[as.character(12)]]$tpm$Metastasis)
+colnames(trainlists[[as.character(12)]]$labels) <- "label"
+
+```
+
+In `predict()`, 
+- `response` gives the fitted probabilities; 
+- `class` produces the class label corresponding to the maximum probability
+
+```{R}
+# Function to get ACC, SN, SP, F1, MCC, AUC, BAC
+perf_results <- function(actual, predicted, predictionScores, model){
+ results <- list()
+ cm <- confusionMatrix(data=as.factor(predicted), reference=as.factor(actual), positive="1")
+ results[['ACC']] <- as.numeric(cm$overall['Accuracy'])
+ results[['SN']] <- as.numeric(cm$byClass['Sensitivity'])
+ results[['SP']] <- as.numeric(cm$byClass['Specificity'])
+ results[['F1']] <- as.numeric(cm$byClass['F1'])
+ results[['MCC']] <- ((cm$table[1,1]*cm$table[2,2])-(cm$table[1,2]*cm$table[2,1]))/(sqrt(cm$table[1,1]+cm$table[1,2])*sqrt(cm$table[1,1]+cm$table[2,1])*sqrt(cm$table[2,2]+cm$table[1,2])*sqrt(cm$table[2,2]+cm$table[2,1]))
+ results[['AUC']] <- auc(roc(response=as.vector(actual), predictor=as.vector(predictionScores)))
+ results[['BAC']] <- as.numeric(cm$byClass['Balanced Accuracy'])
+ results[['model']] <- model
+ #results[['ROC']] <- plot.roc(roc(as.vector(actual), as.vector(predictionScores)))
+ results
+}
+
+# Function to run logistic regression
+logisticReg <- function(method, TPMmat, labels){
+  results.list <- list()
+  parameters.list <- list()
+  
+  # Create 10 folds
+  folds <- createFolds(labels$label, k=10)
+
+   # 1/10 for testing, 9/10 for training
+   cv_test <- TPMmat[folds[[10]],]
+   cv_test_labels <- labels[folds[[10]],]
+   cv_train <- TPMmat[-folds[[10]],]
+   cv_train_labels <- labels[-folds[[10]],]
+  
+   # Set initiate parameter
+   for(f in 3:6){
+     cat(paste0(" Feature set ",f, " with genes ", length(featureSets[[as.character(f)]]), "\n"))
+     results.list[[as.character(f)]] <- list()
+     parameters.list[[as.character(f)]] <- list()
+  
+     # Subset TPM table according to genes in the feature set
+     sub_cv_test <- cv_test[, which(names(cv_test) %in% featureSets[[as.character(f)]])]
+     sub_cv_train <- cv_train[, which(names(cv_train) %in% featureSets[[as.character(f)]])]
+
+     # Normalize the TPM values
+     sub_cv_test <- log2(sub_cv_test + 1)
+     sub_cv_train <- log2(sub_cv_train + 1)
+
+     # Construct model matrix with tumor types converted into dummy variables
+     sub_cv_test <- cbind(cv_test$type, sub_cv_test)
+     sub_cv_test <- model.matrix(~ .-1, sub_cv_test)
+     sub_cv_train <- cbind(cv_train$type, sub_cv_train)
+     sub_cv_train <- model.matrix(~ .-1, sub_cv_train)
+     
+     # Build models
+     print(paste0("Building ", method, " model..."))
+     if(method == "lasso"){
+       al = 1
+     }else if(method == "ridge"){
+       al = 0
+     }else if(method == "elasticnet"){
+       al = 0.5
+     }else{
+       print("Models should be lasso or ridge or elasticnet")
+     }
+     cv_fit_model <- cv.glmnet(x=sub_cv_train, y=cv_train_labels, family="binomial", alpha=al, nlambda=200, nfolds = 5)
+     predictionLabels <- predict(cv_fit_model, newx=sub_cv_test, s='lambda.min', type="class")
+     predictionScores <- predict(cv_fit_model, newx=sub_cv_test, s='lambda.min', type="response")
+     results.list[[as.character(f)]] <- perf_results(as.factor(cv_test_labels), as.factor(predictionLabels), predictionScores, cv_fit_model)
+     
+     print(paste0("  AUC: ", round(results.list[[as.character(f)]]$AUC,6), "; ",
+     paste0("MCC: ", round(results.list[[as.character(f)]]$MCC,6)), "; ",
+     paste0("BAC: ", round(results.list[[as.character(f)]]$BAC,6))))
+     # Store model parameters
+     parameters.list[[as.character(f)]]$model <- cv_fit_model
+     parameters.list[[as.character(f)]]$AUC <- results.list[[as.character(f)]]$AUC
+   }
+  list(results.list=results.list, parameters.list=parameters.list)
+}
+
+
+
+ridge.lists <- list()
+lasso.lists <- list()
+elnet.lists <- list()
+for(i in 1:length(trainlists)){
+  ridge.lists[[as.character(i)]] <- logisticReg("ridge", trainlists[[as.character(i)]]$tpm, trainlists[[as.character(i)]]$labels)
+  lasso.lists[[as.character(i)]] <- logisticReg("lasso", trainlists[[as.character(i)]]$tpm, trainlists[[as.character(i)]]$labels)
+  elnet.lists[[as.character(i)]] <- logisticReg("elasticnet", trainlists[[as.character(i)]]$tpm, trainlists[[as.character(i)]]$labels) 
+}
+
+```
+
+### Draw plots for performance of CV
+```{R}
+# Ridge performances
+print(draw_CCC(ridge.lists))
+# Lasso performances
+print(draw_CCC(lasso.lists))
+# Elastic net performances
+print(draw_CCC(elnet.lists))
+
+```
+
+
+### Test models on the whole dataset including training data
+```{R}
+testWhole <- function(parameters.list, featureSets){
+  test.list <- list()
+  
+  for(fs in 3:6){
+    # Subset expression data
+    sub_valid <- valid[, which(names(valid) %in% featureSets[[as.character(fs)]])]
+    #testvalid1 <- draw_tpm(sub_valid, valid_labels, "validate TPM before norm")
+    sub_valid <- log2(sub_valid + 1)
+    #testvalid2 <- draw_tpm(sub_valid, valid_labels, "validate TPM after norm")
+    #print(ggarrange(testvalid1, testvalid2, ncol=2, nrow=1, common.legend = T, legend = "right"))
+    
+    # Construct model matrix with tumor types converted into dummy variables
+    sub_valid <- cbind(valid$type, sub_valid)
+    sub_valid <- model.matrix(~ .-1, sub_valid)
+
+    print(paste0("FS", fs))
+    test.list[[as.character(fs)]] <- list()
+    
+    model <- parameters.list[[as.character(fs)]][["model"]]
+    # Performance in valid set
+    predictionLabels.valid <- predict(model, newx=sub_valid, type="class")
+    predictionScores.valid <- predict(model, newx=sub_valid, type="response")
+    test.list[[as.character(fs)]] <- perf_results(valid_labels, predictionLabels.valid, predictionScores.valid, model)
+    print(paste0("Valid dataset AUC ", round(test.list[[as.character(fs)]]$AUC, 4), " ;", 
+    paste0("BAC ", round(test.list[[as.character(fs)]]$BAC, 4)), " ;",
+    paste0("MCC ", round(test.list[[as.character(fs)]]$MCC, 4), " ;")))
+  }
+  test.list
+}
+
+ridge.test <- list()
+for(i in 1:length(ridge.lists)){
+  ridge.test[[as.character(i)]][["results.list"]] <- testWhole(ridge.lists[[as.character(i)]]$parameters.list, featureSets)
+}
+draw_CCC(ridge.test)
+
+lasso.test <- list()
+for(i in 1:length(lasso.lists)){
+  lasso.test[[as.character(i)]][["results.list"]] <- testWhole(lasso.lists[[as.character(i)]]$parameters.list, featureSets)
+}
+draw_CCC(lasso.test)
+
+elnet.test <- list()
+for(i in 1:length(elnet.lists)){
+  elnet.test[[as.character(i)]][["results.list"]] <- testWhole(elnet.lists[[as.character(i)]]$parameters.list, featureSets)
+}
+draw_CCC(elnet.test)
+```
+
+
