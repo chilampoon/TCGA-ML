@@ -1,5 +1,5 @@
 ---
-title: "glmnet"
+title: "glmnet using DEGs as features"
 output: html_document
 ---
 
