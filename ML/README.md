@@ -43,14 +43,20 @@ The performance of these 6 feature sets are not quite well, so I will try to do 
 # To Do:
 
 1. ~~Redo the preprocessing and differential expression analyses using the `~ Metastasis + Type` design matrix~~ 
-2.0 ~~Try to utilize all `y=0` samples (rotation)~~
-2.1 ~~Add tissue type dummy variables into glmnet matrix~~
+
+2.1 ~~Try to utilize all `y=0` samples (rotation)~~
+    
+2.2 ~~Add tissue type dummy variables into glmnet matrix~~
+
 2. ~~Implement *glmnet* to the undersampled whole dataset and every individual tumor type **using log2(TPM + 1)**~~
 3. ~~Plot the performances~~
 4. ~~GOseq analysis using esIDs-GOterms `gene2Cat`~~
 5. Plot the TPM desity/distribution plots (make sure what to plot)
+
 5.1 Use feature selection methods like mRMR to select GOterms, probably need to select the highly overlapped GO terms manually
+
 5.2 Plot the GOterms pvalues
+
 6. Sum up the TPM values in GOterms, then redo the *glmnet* and apply to *random forest* using new features
 7. Try *xgboost*, *SVM* and other algorithms and other feature engineering methods!
 
