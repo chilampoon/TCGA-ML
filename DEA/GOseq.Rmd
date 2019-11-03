@@ -1,0 +1,98 @@
+---
+title: "GOseq"
+output: html_document
+---
+
+```{R set up}
+suppressPackageStartupMessages({
+  library(goseq)
+  library(DESeq2)
+  library(edgeR)
+  library(caret)
+  library(dplyr)
+  library(caTools)
+  library(gplots)
+  library(pROC)
+  library(ggpubr)
+})
+```
+
+### 1. Conduct pathway enrichment analysis using GOSeq
+
+```{R}
+# Load toptable from limma
+ttable <- read.delim("/home/ubuntu/hdd/tcga/dea/ttables/tt.design2.txt", header=T)
+gene_fs <- as.integer(ttable$adj.P.Val < 0.1)
+names(gene_fs) <- row.names(ttable)
+table(gene_fs)
+
+# Conduct GOSeq
+pwf <- nullp(gene_fs, "hg19", "ensGene")
+GO.wall <- goseq(pwf, "hg19", "ensGene", use_genes_without_cat=F)
+head(GO.wall, 50)
+
+# Get the gene lists of "numDFinCat" in GO.wall report
+getGeneLists <- function(pwf, goterms, genome, ids){
+  gene2cat <- getgo(rownames(pwf), genome, ids)
+  cat2gene <- split(rep(names(gene2cat), sapply(gene2cat, length)),
+                    unlist(gene2cat, use.names = FALSE))
+  out <- list()
+  for(term in goterms){
+    tmp <- pwf[cat2gene[[term]],]
+    tmp <- rownames(tmp[tmp$DEgenes > 0, ])
+    out[[term]] <- tmp
+  }
+  out
+}
+
+top.wall <- GO.wall[GO.wall$over_represented_pvalue < 0.01, ]
+goterms <- GO.wall[GO.wall$over_represented_pvalue < 0.01, ]$category 
+goList <- getGeneLists(pwf, goterms, "hg19", "ensGene")
+
+write.table(GO.wall, "/home/ubuntu/hdd/tcga/machines/features/GOterms/go.wall.txt", sep="\t", quote=F)
+```
+
+### 2. Add up the tpm values in each term
+After adding up, a 6125 * 30 matrix will be generated. Then implement the log2 normalization.
+
+```{R}
+# Get the filtered tpm table & cdr first (6125 subjects)
+txi <- readRDS("/home/ubuntu/hdd/tcga/txi.split/filted.txi.rds")
+tpm <- txi[["abundance"]]
+cdr <- read.csv("/home/ubuntu/hdd/tcga/clinic/new.filt.cdr.csv", header = T, row.names = 1)
+
+# Create GOterm-TPM dataframe
+addTPM <- function(tpm, goList){
+  # Function to sum the tpm values within one goterm
+  extractTPM <- function(goterm){
+    genes <- goList[[goterm]]
+    tpm2 <- tpm[genes, ]
+    tsum <- t(as.data.frame(colSums(tpm2)))
+    rownames(tsum) <- goterm
+    tsum
+  }
+  
+  goterms <- names(goList)
+  tmp_sum <- lapply(goterms, extractTPM)
+  goterm_df <- do.call(rbind, tmp_sum)
+  goterm_df <- as.data.frame(t(goterm_df))
+  goterm_df
+}
+
+GT_df <- addTPM(tpm, goList)
+
+# Do normalization for the tpm table
+#draw_tpm(GT_df, cdr$Metastasis, "TPM before normalization")
+GT_df <- log2(GT_df + 1)
+#draw_tpm(GT_df, cdr$Metastasis, "TPM after normalization")
+
+GT_df$sample_barcode <- rownames(GT_df)
+GT_df <- merge(GT_df, cdr[, c("sample_barcode", "type", "Metastasis")], by="sample_barcode")
+GT_df <- GT_df[with(GT_df, order(Metastasis, sample_barcode)), ]
+
+rownames(GT_df) <- GT_df$sample_barcode
+GT_df <- GT_df[, which(colnames(GT_df) != "sample_barcode")]
+GT_df$Metastasis <- ordered(GT_df$Metastasis)
+
+saveRDS(GT_df, "/home/ubuntu/hdd/tcga/machines/features/GOterms/go.tpm.rds")
+```
