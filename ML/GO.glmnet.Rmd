@@ -1,0 +1,383 @@
+---
+title: "GOseq"
+output: html_document
+---
+
+```{r set up}
+suppressPackageStartupMessages({
+  library(goseq)
+  library(DESeq2)
+  library(edgeR)
+  library(glmnet)
+  library(caret)
+  library(dplyr)
+  library(caTools)
+  library(gplots)
+  library(pROC)
+  library(ggpubr)
+})
+```
+
+### Load processed GO-TPM dataframe
+```{R loading}
+GT_df <- readRDS("/home/ubuntu/hdd/tcga/machines/features/GOterms/go.tpm.rds")
+GT_df$sample_barcode <- rownames(GT_df)
+colnames(GT_df) <- gsub(":", ".", colnames(GT_df))
+```
+
+### Redo glmnet using new features
+
+```{R split}
+# Split the dataset into 90% training and 10% testing
+set.seed(88)
+sample <- sample.split(GT_df$Metastasis, SplitRatio = 0.9)
+base_train <- subset(GT_df, sample==T)
+base_test <- subset(GT_df, sample==F)
+base_test_labels <- base_test$Metastasis
+
+# Ensemble different resampled datasets
+all_noM <- base_train %>% filter(Metastasis==0)
+train_M <- base_train %>% filter(Metastasis==1)
+
+trainlists <- list()
+t <- 1
+while(t < 13){
+  sample <- sample.split(rownames(all_noM), SplitRatio=nrow(train_M)/nrow(all_noM))
+  train_noM <- subset(all_noM, sample==T)
+  all_noM <- subset(all_noM, sample==F)
+  trainlists[[as.character(t)]] <- list()
+  trainlists[[as.character(t)]]$tpm <- rbind(train_M, train_noM)
+  trainlists[[as.character(t)]]$labels <- as.data.frame(trainlists[[as.character(t)]]$tpm$Metastasis)
+  colnames(trainlists[[as.character(t)]]$labels) <- "label"
+  t <- t + 1
+}
+
+# Add the 13th training set
+trainlists[[as.character(13)]] <- list()
+trainlists[[as.character(13)]]$tpm <- rbind(train_M, all_noM)
+trainlists[[as.character(13)]]$labels <- as.data.frame(trainlists[[as.character(13)]]$tpm$Metastasis)
+colnames(trainlists[[as.character(13)]]$labels) <- "label"
+```
+
+#### Build models
+```{R regression}
+# Function to get ACC, SN, SP, F1, MCC, AUC, BAC
+perf_results <- function(actual, predicted, predictionScores, model){
+ results <- list()
+ cm <- confusionMatrix(data=as.factor(predicted), reference=as.factor(actual), positive="1")
+ results[['ACC']] <- as.numeric(cm$overall['Accuracy'])
+ results[['SN']] <- as.numeric(cm$byClass['Sensitivity'])
+ results[['SP']] <- as.numeric(cm$byClass['Specificity'])
+ results[['F1']] <- as.numeric(cm$byClass['F1'])
+ results[['MCC']] <- ((cm$table[1,1]*cm$table[2,2])-(cm$table[1,2]*cm$table[2,1]))/(sqrt(cm$table[1,1]+cm$table[1,2])*sqrt(cm$table[1,1]+cm$table[2,1])*sqrt(cm$table[2,2]+cm$table[1,2])*sqrt(cm$table[2,2]+cm$table[2,1]))
+ results[['AUC']] <- auc(roc(response=as.vector(actual), predictor=as.vector(predictionScores)))
+ results[['BAC']] <- as.numeric(cm$byClass['Balanced Accuracy'])
+ results[['model']] <- model
+ #results[['ROC']] <- plot.roc(roc(as.vector(actual), as.vector(predictionScores)))
+ results
+}
+
+# Function to run logistic regression
+logisticReg <- function(trainlist){
+  tpm <- trainlist[["tpm"]]
+  labels <- trainlist[["labels"]]$label
+  parameters.list <- list()
+
+  # Construct model matrix with tumor types converted into dummy variables
+  cv_train <- tpm[, which(!names(tpm) %in% c("Metastasis", "sample_barcode"))]
+  cv_train <- model.matrix(~ .-1, cv_train)
+  
+  # Build models
+  for(method in c("lasso", "ridge", "elasticnet")){
+    if(method == "lasso"){
+      al = 1
+    }else if(method == "ridge"){
+      al = 0
+    }else if(method == "elasticnet"){
+      al = 0.5
+    }else{
+      print("Models should be lasso or ridge or elasticnet")
+    }
+    cv_fit_model <- cv.glmnet(x=cv_train, y=labels, family="binomial", alpha=al, nfolds = 5) 
+    parameters.list[[method]] <- cv_fit_model
+  }
+  parameters.list
+}
+
+parameters.list <- list()
+
+for(i in 1:length(trainlists)){
+  parameters.list[[as.character(i)]] <- logisticReg(trainlists[[as.character(i)]])
+}
+
+```
+
+### Test models on the testing dataset
+```{R testing}
+testglmnet <- function(testset, parameters.list){
+  test.list <- list()
+  test.list$bestAUC <- 0
+  test.list$bestMethod <- NA
+  test.list$bestModel <- list()
+
+  sub_test <- testset[, which(!colnames(testset) %in% c("Metastasis", "sample_barcode"))]
+  sub_test_labels <- testset$Metastasis
+  
+  # Construct model matrix with tumor types converted into dummy variables
+  sub_test <- model.matrix(~ .-1, sub_test)
+  
+  for(method in c("lasso", "ridge", "elasticnet")){
+    model <- parameters.list[[method]]
+    predictionLabels.test <- predict(model, newx=sub_test, s='lambda.min', type="class")
+    predictionScores.test <- predict(model, newx=sub_test, s='lambda.min', type="response")
+    test.list[[method]] <- perf_results(sub_test_labels, predictionLabels.test, predictionScores.test, model)
+    print(paste0("  ", method, "- Testing dataset AUC ", round(test.list[[method]]$AUC, 4), " ;", 
+          paste0("BAC ", round(test.list[[method]]$BAC, 4)), " ;",
+          paste0("MCC ", round(test.list[[method]]$MCC, 4))))
+    
+    # Update the best result
+    if(test.list[[method]]$AUC > test.list$bestAUC){
+      test.list$bestAUC <- test.list[[method]]$AUC
+      test.list$bestMethod <- method
+      test.list$bestModel <- model
+    }
+  }
+  test.list
+}
+
+test.results <- list()
+test.results$bestAUC <- 0
+test.results$bestMethod <- NA
+test.results$bestModel <- list()
+
+for(i in 1:length(parameters.list)){
+  print(paste0("Trainlist ", i))
+  test.results[[as.character(i)]] <- testglmnet(base_test, parameters.list[[as.character(i)]])
+  if(test.results[[as.character(i)]]$bestAUC > test.results$bestAUC){
+    test.results$bestAUC <- test.results[[as.character(i)]]$bestAUC
+    test.results$bestMethod <- test.results[[as.character(i)]]$bestMethod
+    test.results$bestModel <- test.results[[as.character(i)]]$bestModel
+  }
+}
+
+print(paste0("The best: ", test.results$bestMethod, ", AUC ", round(test.results$bestAUC, 5)))
+
+
+```
+
+#### Plot the performances 
+```{R plot}
+draw_CCC <- function(results.list){
+  # AUC
+  auc_df <- data.frame(ridge = rep(0,length(trainlists)),
+                         lasso = rep(0,length(trainlists)),
+                         elnet = rep(0,length(trainlists)))
+
+  for(list in 1:length(trainlists)){
+    auc_df[list,][1] <- results.list[[as.character(list)]][["ridge"]][["AUC"]]
+    auc_df[list,][2] <- results.list[[as.character(list)]][["lasso"]][["AUC"]]
+    auc_df[list,][3] <- results.list[[as.character(list)]][["elasticnet"]][["AUC"]]
+  }
+  auc_p <- ggplot(stack(auc_df), aes(x=ind, y=values, fill=ind)) +
+    geom_boxplot() + scale_y_continuous(limits=c(0,1)) +
+    labs(title="AUC", x="", y="", fill="Sets") + scale_fill_brewer(palette="Dark2") +
+    theme_classic()
+  
+  # BAC
+  bac_df <- data.frame(ridge = rep(0,length(trainlists)),
+                         lasso = rep(0,length(trainlists)),
+                         elnet = rep(0,length(trainlists)))
+
+  for(list in 1:length(trainlists)){
+    bac_df[list,][1] <- results.list[[as.character(list)]][["ridge"]][["BAC"]]
+    bac_df[list,][2] <- results.list[[as.character(list)]][["lasso"]][["BAC"]]
+    bac_df[list,][3] <- results.list[[as.character(list)]][["elasticnet"]][["BAC"]]
+  }
+  bac_p <- ggplot(stack(bac_df), aes(x=ind, y=values, fill=ind)) +
+    geom_boxplot() + scale_y_continuous(limits=c(0,1)) +
+    labs(title="BAC", x="", y="", fill="Sets") + scale_fill_brewer(palette="Dark2") +
+    theme_classic()
+  
+  # MCC
+  mcc_df <- data.frame(ridge = rep(0,length(trainlists)),
+                         lasso = rep(0,length(trainlists)),
+                         elnet = rep(0,length(trainlists)))
+
+  for(list in 1:length(trainlists)){
+    mcc_df[list,][1] <- results.list[[as.character(list)]][["ridge"]][["MCC"]]
+    mcc_df[list,][2] <- results.list[[as.character(list)]][["lasso"]][["MCC"]]
+    mcc_df[list,][3] <- results.list[[as.character(list)]][["elasticnet"]][["MCC"]]
+  }
+  mcc_p <- ggplot(stack(mcc_df), aes(x=ind, y=values, fill=ind)) +
+    geom_boxplot() + scale_y_continuous(limits=c(0,1)) +
+    labs(title="MCC", x="", y="", fill="Sets") + scale_fill_brewer(palette="Dark2") +
+    theme_classic()
+
+  ggarrange(auc_p, bac_p, mcc_p, ncol=3, nrow=1, common.legend=T, legend = "right")
+}
+
+draw_CCC(test.results)
+```
+
+### Results analysis
+
+```{R}
+final.model <- test.results$bestModel
+final.method <- test.results$bestMethod
+final.test <- base_test[, which(!names(base_test) %in% c("Metastasis", "sample_barcode"))]
+final.test <- model.matrix(~ .-1, final.test)
+final.predictionLabels <- predict(final.model, newx=final.test, s='lambda.min', type='class')
+final.predictionScores <- predict(final.model, newx=final.test, s='lambda.min', type='response')
+```
+
+#### ROC curve
+```{R}
+plot.roc(roc(as.vector(base_test_labels), as.vector(final.predictionScores)))
+auc(roc(as.vector(base_test_labels), as.vector(final.predictionScores)))
+confusionMatrix(as.factor(final.predictionLabels), as.factor(base_test_labels), positive="1")
+```
+
+#### Distribution of prediction scores
+```{R}
+tmp.scores <- as.data.frame(final.predictionScores)
+colnames(tmp.scores) <- "predictionScores"
+
+ggplot(tmp.scores, aes(x=predictionScores)) +
+  geom_density() +
+  ggtitle("Distribution of metastasis predictions scores") +
+  coord_cartesian(xlim=c(0,1)) +
+  theme_minimal()
+
+```
+
+#### Important GO terms
+```{R impt}
+model.coef <- as.matrix(coef(final.model))
+model.coef <- as.data.frame(model.coef)
+colnames(model.coef) <- "coefficient"
+model.coef$variable <- rownames(model.coef)
+impt.coef <- model.coef[which(model.coef$coefficient > 0), ]
+impt.coef <- impt.coef[order(impt.coef$coefficient, decreasing = T), ]
+
+GO.wall <- read.delim("/home/ubuntu/hdd/tcga/machines/features/GOterms/go.wall.txt")
+GO.wall$category <- gsub(":", ".", GO.wall$category)
+
+assignName <- function(v){
+  if(v %in% GO.wall$category){
+    name <- as.character(GO.wall[GO.wall$category==v,]$term)
+  }else{
+    name <- v
+  }
+  name
+}
+impt.coef$names <- sapply(impt.coef$variable, assignName)
+
+ggplot(impt.coef, aes(x=reorder(names, coefficient), y=coefficient)) + 
+  geom_point() +
+  coord_flip() +
+  ggtitle("Variables with the non-zero coefficients") +
+  theme_minimal()
+```
+
+### Test the model in each tissue
+```{R}
+final.test2 <- base_test[, which(names(base_test) !=  "sample_barcode")]
+
+all.type <- as.character(unique(base_test$type))
+all.type <- all.type[! all.type %in% c("CHOL", "GBM", "KICH", "KIRC", "KIRP", "LGG", "LIHC", "OV")]
+
+single_test <- function(tissue, testset){
+  single.results <- list()
+  for(t in tissue){
+    s.test <- testset %>% filter(type == t)
+    s.label <- s.test$Metastasis
+    if(1 %in% s.label){
+      s.test <- s.test[, which(names(s.test) != "Metastasis")]
+      s.test <- model.matrix(~.-1, s.test)
+      single.results[[t]] <- list()
+      s.predictionLables <- predict(final.model, newx=s.test, type='class')
+      s.predictionScores <- predict(final.model, newx=s.test, type='response')
+      s.test.result <- perf_results(s.label, s.predictionLables, s.predictionScores, final.method)
+      print(t)
+      print(paste0("   AUC ", round(s.test.result$AUC, 4), " ;", 
+                paste0("BAC ", round(s.test.result$BAC, 4)), " ;",
+                paste0("MCC ", round(s.test.result$MCC, 4), " ;")))
+      single.results[[t]] <- s.test.result
+    }
+  }
+  single.results
+}
+
+
+single.results <- single_test(all.type, final.test2)
+
+```
+
+
+
+### Save
+```{R}
+result_dir <- "/home/ubuntu/hdd/tcga/machines/results/glmnet/GO"
+saveRDS(parameters.list, file.path(result_dir, "glmnet.lists.rds"))
+saveRDS(test.results, file.path(result_dir, "test.list.rds"))
+```
+
+### Feature selection?
+```{R, eval=F}
+## Try mRMR to do feature selection
+
+mRMR_TPM <- mRMR.data(data=GT_df[, c(1:464, 466)])
+mRMR_features <- mRMR.classic(data=mRMR_TPM, target_indices = 465, feature_count = 50)
+
+scores(mRMR_features)
+selected_features <- mRMR_features@feature_names[mRMR_features@filters[["465"]]]
+top.wall[top.wall$category %in% selected_features, ]
+
+dataset <- GT_df[, colnames(GT_df) %in% c(selected_features, "type", "Metastasis")]
+
+## `neroZeroVar` to remove the features with very few unique values
+#nearZeroVar(GT_df, saveMetrics = TRUE)
+
+---
+# Calculate the correlation between GO terms
+cor() 
+
+```
+
+
+
+### Use mRMR in caret
+```{R, eval=F}
+data(cgps)
+data.annot <- data.frame(cgps.annot)
+
+
+
+##Preparing validation dataset
+validation_expr <- summarizeMolecularProfiles(CCLE, mDataType="rna", fill.missing=FALSE, verbose=FALSE)
+actual_labels <- summarizeSensitivityProfiles(CCLE, sensitivity.measure="auc_recomputed", drug="lapatinib", fill.missing=FALSE, verbose=FALSE)
+
+for(method in c("ridge", "lasso", "random_forest", "svm")){
+  par(mfrow=c(1, 2))
+  res <- optimization(train=df[, -ncol(df), drop=F],
+  labels=t(df[, ncol(df), drop=F]),
+  method=method,
+  folds.no=5,
+  sampling.no=1,
+  features.no=10,
+  feature.selection="mRMR",
+  assessment=c("corr", "mCI"))
+  validation_labels <- validation(model=res$model$lapatinib,
+                                  validation.set=t(exprs(validation_expr)),
+                                  validation.labels=actual_labels,
+                                  method=method,
+                                  assessment="mCI")
+}
+
+
+```
+
+
+
+
+

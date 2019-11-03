@@ -1,0 +1,286 @@
+---
+title: "xgboost using GOterms"
+output: html_document
+---
+
+```{R set up}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(ggplot2)
+  library(ggpubr)
+  library(caTools)
+  library(caret)
+  library(xgboost)
+  library(pROC)
+})
+```
+
+### Load processed GO-TPM dataframe
+```{R load}
+GT_df <- readRDS("/home/ubuntu/hdd/tcga/machines/features/GOterms/go.tpm.rds")
+GT_df$sample_barcode <- rownames(GT_df)
+colnames(GT_df) <- gsub(":", ".", colnames(GT_df))
+```
+
+
+```{R prepare}
+# Split the dataset into 90% training and 10% testing
+set.seed(88)
+sample <- sample.split(GT_df$Metastasis, SplitRatio = 0.9)
+base_train <- subset(GT_df, sample==T)
+base_test <- subset(GT_df, sample==F)
+
+# Ensemble different resampled datasets
+table(base_train$Metastasis)
+all_noM <- base_train %>% filter(Metastasis==0)
+train_M <- base_train %>% filter(Metastasis==1)
+
+# For saving different training sets
+ensemblLists <- function(imbalanced0, imbalanced1, numOfList){
+  trainlists <- list()
+  t <- 1
+  while(t < numOfList){
+    sample <- sample.split(imbalanced0$sample_barcode, SplitRatio=nrow(imbalanced1)/nrow(imbalanced0))
+    train_noM <- subset(imbalanced0, sample==T)
+    imbalanced0 <- subset(imbalanced0, sample==F)
+    trainlists[[as.character(t)]] <- list()
+    trainlists[[as.character(t)]]$tpm <- rbind(imbalanced1, train_noM)
+    trainlists[[as.character(t)]]$labels <- as.data.frame(trainlists[[as.character(t)]]$tpm$Metastasis)
+    colnames(trainlists[[as.character(t)]]$labels) <- "label"
+    t <- t + 1
+  }
+
+  # Add the 13th training set
+  trainlists[[as.character(numOfList)]] <- list()
+  trainlists[[as.character(numOfList)]]$tpm <- rbind(imbalanced1, imbalanced0)
+  trainlists[[as.character(numOfList)]]$labels <- as.data.frame(trainlists[[as.character(numOfList)]]$tpm$Metastasis)
+  colnames(trainlists[[as.character(numOfList)]]$labels) <- "label"
+  trainlists
+}
+  
+trainlists <- ensemblLists(all_noM, train_M, 13)
+```
+
+### Cross-validation
+```{R cv}
+# Function to get ACC, SN, SP, F1, MCC, AUC, BAC
+perf_results <- function(actual, predicted, predictionScores, model){
+ results <- list()
+ cm <- confusionMatrix(data=as.factor(predicted), reference=as.factor(actual), positive="1")
+ results[['ACC']] <- as.numeric(cm$overall['Accuracy'])
+ results[['SN']] <- as.numeric(cm$byClass['Sensitivity'])
+ results[['SP']] <- as.numeric(cm$byClass['Specificity'])
+ results[['F1']] <- as.numeric(cm$byClass['F1'])
+ results[['MCC']] <- ((cm$table[1,1]*cm$table[2,2])-(cm$table[1,2]*cm$table[2,1]))/(sqrt(cm$table[1,1]+cm$table[1,2])*sqrt(cm$table[1,1]+cm$table[2,1])*sqrt(cm$table[2,2]+cm$table[1,2])*sqrt(cm$table[2,2]+cm$table[2,1]))
+ results[['AUC']] <- auc(roc(response=as.vector(actual), predictor=as.vector(predictionScores)))
+ results[['BAC']] <- as.numeric(cm$byClass['Balanced Accuracy'])
+ results[['model']] <- model
+ #results[['ROC']] <- plot.roc(roc(as.vector(actual), as.vector(predictionScores)))
+ results
+}
+
+
+# Function to run svm
+xgboostCV <- function(trainlist){
+  tpm <- trainlist[["tpm"]]
+  labels <- trainlist[["labels"]]
+  parameters.list <- list()
+  results.list <- list()
+    
+  #Subset TPM
+  cv_train <- tpm[, which(!names(tpm) %in% c("sample_barcode", "Metastasis"))]
+  
+  # Create 5 folds
+  folds <- createFolds(labels$label, k=5)
+  for(i in 1:5){
+    results.list[[as.character(i)]]<- list()
+    parameters.list[[as.character(i)]] <- list()
+    
+    # 1/5 for validation, 4/5 for training
+    sub_cv_train <- cv_train[-folds[[i]],]
+    sub_cv_train <- model.matrix(~.-1, sub_cv_train)
+    sub_cv_train_labels <- labels[-folds[[i]],]
+    sub_cv_validate <- cv_train[folds[[i]],]
+    sub_cv_validate <- model.matrix(~.-1, sub_cv_validate)
+    sub_cv_validate_labels <- labels[folds[[i]],]
+    
+    # Initialize model & parameters
+    xgb_model <- xgboost(data=sub_cv_train, label = as.numeric(sub_cv_train_labels) - 1, objective="binary:logistic", max_depth=15, eta=0.2, nround=25, verbose=FALSE)
+    predictionLabels <- round(predict(xgb_model, sub_cv_validate), digits = 0)
+    predictionPrs <- predict(xgb_model, sub_cv_validate)
+    results.list[[as.character(i)]] <- perf_results(sub_cv_validate_labels, predictionLabels, predictionPrs, xgb_model)
+    parameters.list[[as.character(i)]] <- xgb_model
+    
+    print(paste0("Fold ", i))
+    print(paste0("  AUC:", round(results.list[[as.character(i)]]$AUC, 6), ";", 
+                 "  MCC: ", round(results.list[[as.character(i)]]$MCC,6), ";",
+                 "  BAC: ", round(results.list[[as.character(i)]]$BAC,6)))
+  }
+
+  list(results.list=results.list, parameters.list=parameters.list)
+}
+# Loop for ensembled training sets
+xgb.lists <- list()
+for(i in 1:length(trainlists)){
+  print(paste0("=========================Trainlist ", i, "========================="))
+  xgb.lists[[as.character(i)]] <- xgboostCV(trainlists[[as.character(i)]])
+}
+```
+
+### Test on independent testing set
+```{R testing}
+testXGB <- function(testset, parameters.list){
+  # Find the best model from every 5 folds of every 6 feature sets
+  # Find the best fold from all trainlists
+  test.list <- list()
+  test.list$bestAUC <- 0
+  test.list$bestModel <- NA
+
+  # Subset expression data
+  sub_test <- testset[, which(!names(testset) %in% c("sample_barcode", "Metastasis"))]
+  sub_test <- model.matrix(~.-1, sub_test)
+  sub_test_labels <- base_test$Metastasis
+  
+  # loop the folds
+  for(i in 1:5){
+    test.list[[as.character(i)]] <- list()
+    model <- parameters.list[[as.character(i)]]
+    # Test on testing set
+    predictionLabels_test <- round(predict(model, sub_test), digits=0)
+    predictionPrs_test <- predict(model, sub_test)
+    test.list[[as.character(i)]]$results <- perf_results(sub_test_labels, predictionLabels_test, predictionPrs_test, model)
+    # Find the highest AUC from models trained in 5 folds
+    if(test.list[[as.character(i)]][['results']]$AUC > test.list$bestAUC){
+      test.list$bestAUC <- test.list[[as.character(i)]][['results']]$AUC
+      test.list$bestBAC <- test.list[[as.character(i)]][['results']]$BAC
+      test.list$bestMCC <- test.list[[as.character(i)]][['results']]$MCC 
+      test.list$bestModel <- model
+    }
+  }
+  print(paste0("The best AUC ", round(test.list$bestAUC, 5)))
+  test.list
+}
+
+test.results <- list()
+test.results$bestAUC <- 0
+
+for(i in 1:length(trainlists)){
+  print(paste0("Trainlist", i))
+  test.results[[as.character(i)]] <- testXGB(base_test, xgb.lists[[as.character(i)]][["parameters.list"]])
+  if(test.results[[as.character(i)]]$bestAUC > test.results$bestAUC){
+    test.results$bestAUC <- test.results[[as.character(i)]]$bestAUC
+    test.results$bestModel <- test.results[[as.character(i)]]$bestModel
+  }
+}
+
+print(paste("Best Testing AUC: ", test.results$bestAUC))
+```
+
+### Draw the performances
+```{R draw}
+xgb_CCC <- function(rf.list, trainlistLen){
+  # Draw each test's AUC
+  auc_df <- data.frame(test = rep(0, trainlistLen))
+  
+  for(set in 1:trainlistLen){
+    auc_df$test[set] <- rf.list[[as.character(set)]]$bestAUC
+  }
+
+  auc_p <- ggplot(stack(auc_df), aes(x=ind, y=values, fill=ind)) +
+    geom_boxplot() + scale_y_continuous(limits=c(0,1)) +
+    labs(title="AUC", x="", y="", fill="Sets") + scale_fill_brewer(palette="Dark2") +
+    theme_classic()
+  
+  # Draw each feature set's BAC
+  bac_df <- data.frame(test = rep(0, trainlistLen))
+  
+  for(set in 1:trainlistLen){
+    bac_df$test[set] <- rf.list[[as.character(set)]]$bestBAC
+  }
+  
+  bac_p <- ggplot(stack(bac_df), aes(x=ind, y=values, fill=ind)) +
+    geom_boxplot() + scale_y_continuous(limits=c(0,1)) +
+    labs(title="BAC", x="", y="", fill="Sets") + scale_fill_brewer(palette="Dark2") +
+    theme_classic()
+  
+  # Draw each feature set's MCC
+  mcc_df <- data.frame(test = rep(0, trainlistLen))
+  
+  for(set in 1:trainlistLen){
+    mcc_df$test[set] <- rf.list[[as.character(set)]]$bestMCC
+  }
+
+  mcc_p <- ggplot(stack(mcc_df), aes(x=ind, y=values, fill=ind)) +
+    geom_boxplot() + scale_y_continuous(limits=c(-1,1)) +
+    labs(title="MCC", x="", y="", fill="") + scale_fill_brewer(palette="Dark2") +
+    theme_classic()
+  
+  ggarrange(auc_p, bac_p, mcc_p, ncol=3, nrow=1, common.legend=T, legend = "right")
+}
+
+xgb_CCC(test.results, length(trainlists))
+
+```
+
+```{R final stuff}
+final.model <- test.results$bestModel
+final.test <- base_test[, which(!names(base_test) %in% c("sample_barcode", "Metastasis"))]
+final.test <- model.matrix(~.-1, final.test)
+final.predictionLabels <- round(predict(final.model, newdata=final.test), digit=0)
+final.predictionDes <- predict(final.model, newdata=final.test)
+```
+
+#### ROC curve
+```{R roc}
+base_test_labels <- base_test$Metastasis
+plot.roc(roc(as.numeric(base_test_labels), as.vector(final.predictionDes)))
+auc(roc(as.vector(base_test_labels), as.numeric(final.predictionDes)))
+confusionMatrix(as.factor(final.predictionLabels), as.factor(base_test_labels), positive="1")
+```
+
+#### Distribution of prediction scores
+```{R distribution}
+tmp.scores <- as.data.frame(final.predictionDes)
+colnames(tmp.scores) <- "predictionDes"
+
+ggplot(tmp.scores, aes(x=predictionDes)) +
+  geom_density() +
+  ggtitle("Distribution of metastasis predictions scores") +
+  coord_cartesian(xlim=c(0,1)) +
+  theme_minimal()
+```
+
+#### Important genes
+```{R impt}
+importance_matrix <- xgb.importance(model = final.model)
+impdf <- importance_matrix[,1:2]
+
+GO.wall <- read.delim("/home/ubuntu/hdd/tcga/machines/features/GOterms/go.wall.txt")
+GO.wall <- GO.wall[, which(colnames(GO.wall) %in% c("category", "term"))]
+GO.wall$category <- gsub(":", ".", GO.wall$category)
+
+assignName <- function(v){
+  if(v %in% GO.wall$category){
+    name <- as.character(GO.wall[GO.wall$category==v,]$term)
+  }else{
+    name <- v
+  }
+  name
+}
+
+impdf$GOnames <- sapply(impdf$Feature, assignName)
+
+ggplot(impdf[1:40,], aes(x=reorder(GOnames, Gain), y=Gain)) +
+  geom_point() + 
+  coord_flip() +
+  ggtitle("Variables with the non-zero coefficients") +
+  xlab("Features") +
+  theme_minimal()
+```
+
+### Save
+```{R save}
+result_dir <- "/home/ubuntu/hdd/tcga/machines/results/xgboost/GO"
+saveRDS(xgb.lists, file.path(result_dir, "xgb.lists.rds"))
+saveRDS(test.results, file.path(result_dir, "test.list.rds"))
+```

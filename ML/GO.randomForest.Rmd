@@ -1,0 +1,325 @@
+---
+title: "randomForest using GO terms"
+output: html_document
+---
+
+```{R set up, include=T}
+suppressPackageStartupMessages({
+  library(randomForest)
+  library(FSelector)
+  library(caret)
+  library(dplyr)
+  library(caTools)
+  library(gplots)
+  library(pROC)
+  library(ggpubr)
+})
+source("/home/rstudio/tcga/plot.func.R")
+
+```
+
+### Load processed GO-TPM dataframe 
+- After log transformation 
+- With tumor types
+- With metastasis labels
+
+```{R}
+GT_df <- readRDS("/home/ubuntu/hdd/tcga/machines/features/GOterms/go.tpm.rds")
+GT_df$sample_barcode <- rownames(GT_df)
+colnames(GT_df) <- gsub(":", ".", colnames(GT_df))
+```
+
+#### Workflow:
+
+1. Seperate training & testing dataset (9:1)
+
+1.5 Using ensembl method to utilize all imbalanced data
+
+2. 5-fold cross validation for each training data, in each fold do:
+
+  - 4 folds for training, 1 fold for validation (to know the performace of different parameters then choose the best model)
+  
+  - loop for feature selection (like using InfoGain to select subset)
+  
+  - loop for parameter optimization (like grid search for best ntree and mtry)
+
+3. Test models on training data and that independent testing data
+
+
+### Prepare for model building
+
+```{R}
+# Split the dataset into 90% training and 10% testing
+set.seed(88)
+sample <- sample.split(GT_df$Metastasis, SplitRatio = 0.9)
+base_train <- subset(GT_df, sample==T)
+base_test <- subset(GT_df, sample==F)
+
+# Ensemble different resampled datasets
+table(base_train$Metastasis)
+all_noM <- base_train %>% filter(Metastasis==0)
+train_M <- base_train %>% filter(Metastasis==1)
+
+# For saving different training sets
+ensemblLists <- function(imbalanced0, imbalanced1, numOfList){
+  trainlists <- list()
+  t <- 1
+  while(t < numOfList){
+    sample <- sample.split(imbalanced0$sample_barcode, SplitRatio=nrow(imbalanced1)/nrow(imbalanced0))
+    train_noM <- subset(imbalanced0, sample==T)
+    imbalanced0 <- subset(imbalanced0, sample==F)
+    trainlists[[as.character(t)]] <- list()
+    trainlists[[as.character(t)]]$tpm <- rbind(imbalanced1, train_noM)
+    trainlists[[as.character(t)]]$labels <- as.data.frame(trainlists[[as.character(t)]]$tpm$Metastasis)
+    colnames(trainlists[[as.character(t)]]$labels) <- "label"
+    t <- t + 1
+  }
+
+  # Add the 13th training set
+  trainlists[[as.character(numOfList)]] <- list()
+  trainlists[[as.character(numOfList)]]$tpm <- rbind(imbalanced1, imbalanced0)
+  trainlists[[as.character(numOfList)]]$labels <- as.data.frame(trainlists[[as.character(numOfList)]]$tpm$Metastasis)
+  colnames(trainlists[[as.character(numOfList)]]$labels) <- "label"
+  trainlists
+}
+  
+trainlists <- ensemblLists(all_noM, train_M, 13)
+```
+
+### 5 fold cross validation in random forest
+```{R}
+# Function to get ACC, SN, SP, F1, MCC, AUC, BAC
+perf_results <- function(actual, predicted, predictionScores, model){
+ results <- list()
+ cm <- confusionMatrix(data=as.factor(predicted), reference=as.factor(actual), positive="1")
+ results[['ACC']] <- as.numeric(cm$overall['Accuracy'])
+ results[['SN']] <- as.numeric(cm$byClass['Sensitivity'])
+ results[['SP']] <- as.numeric(cm$byClass['Specificity'])
+ results[['F1']] <- as.numeric(cm$byClass['F1'])
+ results[['MCC']] <- ((cm$table[1,1]*cm$table[2,2])-(cm$table[1,2]*cm$table[2,1]))/(sqrt(cm$table[1,1]+cm$table[1,2])*sqrt(cm$table[1,1]+cm$table[2,1])*sqrt(cm$table[2,2]+cm$table[1,2])*sqrt(cm$table[2,2]+cm$table[2,1]))
+ results[['AUC']] <- auc(roc(response=as.vector(actual), predictor=as.vector(predictionScores)))
+ results[['BAC']] <- as.numeric(cm$byClass['Balanced Accuracy'])
+ results[['model']] <- model
+ #results[['ROC']] <- plot.roc(roc(as.vector(actual), as.vector(predictionScores)))
+ results
+}
+
+
+# A function for usage in each training set
+randomForestCV <- function(trainlist){
+  results.list <- list()
+  parameters.list <- list()
+  
+  tpm <- trainlist[["tpm"]]
+  labels <- trainlist[["labels"]]
+  
+  # Create 5 folds
+  folds <- createFolds(labels$label, k=5)
+  for(i in 1:5){
+    results.list[[i]] <- list()
+    parameters.list[[i]] <- list()
+    
+    # 1/5 for validation, 4/5 for training
+    cv_train <- tpm[-folds[[i]], which(colnames(tpm)!="sample_barcode")]
+    cv_train_labels <- labels[-folds[[i]],]
+    cv_validate <- tpm[folds[[i]], which(colnames(tpm)!="sample_barcode")]
+    cv_validate_labels <- labels[folds[[i]],]
+    
+    # No feature selection here --> use all GO terms for forest building 
+    
+    # Initialize model & parameters
+    rf_model <- randomForest(Metastasis~., data=cv_train, ntree=1001) 
+    predictionLabels <- predict(rf_model, newdata=cv_validate, type='response')
+    predictionPrs <- predict(rf_model, newdata=cv_validate, type='prob')
+    results.list[[i]] <- perf_results(cv_validate_labels, predictionLabels, predictionPrs[,1], rf_model)
+    
+    parameters.list[[i]]$n <- 1001
+    parameters.list[[i]]$AUC <- results.list[[i]]$AUC
+    parameters.list[[i]]$model <- results.list[[i]]$model
+    
+    # For parameter optimization -- grid search
+    # print("Optimizing parameters...")
+    # for(n in seq(101, 1001, by=100)){
+    #   # Build rf model with tuned mtry for specified n trees
+    #   tuned_mtry <- (tuneRF(cv_train[,1:ncol(cv_train)-1], cv_train_labels, ntreeTry=n, stepFactor=1.5, improve=0.01, trace=FALSE, plot=FALSE, doBest=TRUE))$mtry
+    #   rf_model_tuned <- randomForest(Metastasis~., data=cv_train, ntree=n, mtry=tuned_mtry)
+    #   
+    #   # Test model with testing dataset
+    #   predictionLabels <- predict(rf_model_tuned, newdata=cv_validate, type='response')
+    #   predictionPrs <- predict(rf_model_tuned, newdata=cv_validate, type='prob')
+    #   results_op <- perf_results(cv_validate_labels, predictionLabels, predictionPrs[,1], rf_model_tuned)
+    #   
+    #   # Update everything if better using the parameters
+    #   if(results_op$AUC > parameters.list[[i]]$AUC){
+    #     parameters.list[[i]]$AUC
+    #     parameters.list[[i]]$model <- rf_model_tuned
+    #     parameters.list[[i]]$n <- n
+    #     results.list[[i]] <- results_op
+    #   }
+    # }
+    
+    # Print the best performance for each fold
+    print(paste0("Fold ", i, " using ", parameters.list[[i]]$n, " trees"))
+    print(paste0("  AUC:", round(results.list[[i]]$AUC, 6), ";", 
+                 "  MCC: ", round(results.list[[i]]$MCC,6), ";",
+                 "  BAC: ", round(results.list[[i]]$BAC,6)))
+  }
+  
+  list(results.list=results.list, parameters.list=parameters.list)
+}
+
+# Loop for ensembled training sets
+RF.lists <- list()
+for(i in 1:length(trainlists)){
+  print(paste0("=========================Trainlist ", i, "========================="))
+  RF.lists[[as.character(i)]] <- randomForestCV(trainlists[[as.character(i)]])
+}
+
+```
+
+Read feature selection [information gain](https://stackoverflow.com/questions/33425824/why-information-gain-feature-selection-gives-zero-scores).
+
+### Test on independent testing set and whole dataset
+
+```{R}
+base_test <- base_test[,which(colnames(base_test)!="sample_barcode")]
+base_test_labels <- base_test$Metastasis
+
+testing <- function(testset, parameters.list){
+  # Use the best model in each fold
+  # Find the best fold
+  test.list <- list()
+  test.list$bestAUC <- 0
+  test.list$bestBAC <- 0
+  test.list$bestMCC <- 0
+  test.list$bestModel <- NA
+  test.list$bestFold <- 0
+  
+  for(i in 1:5){
+    test.list[[as.character(i)]] <- list()
+    model <- parameters.list[[i]]$model
+    
+    # Test on testing set
+    predictionLabels_test <- predict(model, newdata=testset, type='response')
+    predictionPrs_test <- predict(model, newdata=testset, type='prob')
+    test_results <- perf_results(base_test_labels, predictionLabels_test, predictionPrs_test[,1], model)
+    test.list[[as.character(i)]]$results <- test_results
+    # Find the highest AUC from models trained in 5 folds
+    if(test_results$AUC > test.list$bestAUC){
+      test.list$bestAUC <- test_results$AUC
+      test.list$bestBAC <- test_results$BAC
+      test.list$bestMCC <- test_results$MCC
+      test.list$bestModel <- model
+      test.list$bestFold <- i
+    }
+
+  }
+  print(paste(" Testing AUC: ", test.list$bestAUC))
+  test.list
+}
+
+test.results <- list()
+test.results$bestAUC <- 0
+test.results$bestModel <- NA
+
+for(i in 1:length(trainlists)){
+  test.results[[as.character(i)]] <- testing(base_test, RF.lists[[as.character(i)]][["parameters.list"]])
+  if(test.results[[as.character(i)]]$bestAUC > test.results$bestAUC){
+    test.results$bestAUC <- test.results[[as.character(i)]]$bestAUC
+    test.results$bestModel <- test.results[[as.character(i)]]$bestModel
+  }
+}
+
+print(paste("Best Testing AUC: ", test.results$bestAUC))
+
+```
+
+### Draw the performances
+```{R}
+# all.test.list
+rf_CCC <- function(rf.list, trainlistLen){
+  # Draw each test's AUC
+  auc_df <- data.frame(test = rep(0, trainlistLen))
+  
+  for(set in 1:trainlistLen){
+    auc_df$test[set] <- rf.list[[as.character(set)]]$bestAUC
+  }
+
+  auc_p <- ggplot(stack(auc_df), aes(x=ind, y=values, fill=ind)) +
+    geom_boxplot() + scale_y_continuous(limits=c(0,1)) +
+    labs(title="AUC", x="", y="", fill="Sets") + scale_fill_brewer(palette="Dark2") +
+    theme_classic()
+  
+  # Draw each feature set's BAC
+  bac_df <- data.frame(test = rep(0, trainlistLen))
+  
+  for(set in 1:trainlistLen){
+    bac_df$test[set] <- rf.list[[as.character(set)]]$bestBAC
+  }
+  
+  bac_p <- ggplot(stack(bac_df), aes(x=ind, y=values, fill=ind)) +
+    geom_boxplot() + scale_y_continuous(limits=c(0,1)) +
+    labs(title="BAC", x="", y="", fill="Sets") + scale_fill_brewer(palette="Dark2") +
+    theme_classic()
+  
+  # Draw each feature set's MCC
+  mcc_df <- data.frame(test = rep(0, trainlistLen))
+  
+  for(set in 1:trainlistLen){
+    mcc_df$test[set] <- rf.list[[as.character(set)]]$bestMCC
+  }
+
+  mcc_p <- ggplot(stack(mcc_df), aes(x=ind, y=values, fill=ind)) +
+    geom_boxplot() + scale_y_continuous(limits=c(-1,1)) +
+    labs(title="MCC", x="", y="", fill="") + scale_fill_brewer(palette="Dark2") +
+    theme_classic()
+  
+  ggarrange(auc_p, bac_p, mcc_p, ncol=3, nrow=1, common.legend=T, legend = "right")
+}
+
+rf_CCC(test.results, length(trainlists))
+
+```
+
+### Mean decrease in node impurity plots
+Shows the important variables
+```{R}
+GO.wall <- read.delim("/home/ubuntu/hdd/tcga/machines/features/GOterms/go.wall.txt")
+GO.wall <- GO.wall[, which(colnames(GO.wall) %in% c("category", "term"))]
+GO.wall$category <- gsub(":", ".", GO.wall$category)
+
+#varImpPlot(all.test.list$best_model, type=2)
+#impLabels <- as.character(GO.wall[match(impGOID, GO.wall$category),]$term)
+#impLabels <- c("type", impLabels)
+#varImpPlot(all.test.list$best_model, type=2, labels = rev(impLabels), main="Random Forest using DEGs")
+#print(impLabels)
+
+impdf <- varImp(test.results$bestModel)
+impdf$goID <- rownames(impdf)
+impdf <- impdf[order(impdf$Overall, decreasing = T),]
+
+assignName <- function(v){
+  if(v %in% GO.wall$category){
+    name <- as.character(GO.wall[GO.wall$category==v,]$term)
+  }else{
+    name <- v
+  }
+  name
+}
+
+impdf$goID <- sapply(impdf$goID, assignName)
+
+ggplot(impdf[1:40,], aes(x=reorder(goID, Overall), y=Overall)) +
+  geom_point() + 
+  coord_flip() +
+  ggtitle("Variables with the non-zero coefficients") +
+  theme_minimal()
+```
+
+
+### Save
+```{r}
+result_dir <- "/home/ubuntu/hdd/tcga/machines/results/randomForest/GO"
+saveRDS(RF.lists, file.path(result_dir, "RF.lists.rds"))
+saveRDS(test.results, file.path(result_dir, "test.list.rds"))
+```
