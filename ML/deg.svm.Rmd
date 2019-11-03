@@ -1,0 +1,307 @@
+---
+title: "SVM using DEGs"
+output: html_document
+---
+Apply support vector machine using six feature sets. (should select the best feature set after trying three algorithms)
+
+```{R set up}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(ggplot2)
+  library(ggpubr)
+  library(caTools)
+  library(caret)
+  library(kernlab)
+  library(pROC)
+})
+```
+
+### Cross-validation on different feature sets
+#### Preparation
+```{R prepare}
+# Get the filtered tpm table & cdr first (6125 subjects)
+txi <- readRDS("/home/ubuntu/hdd/tcga/txi.split/filted.txi.rds")
+tpm <- txi[["abundance"]]
+cdr <- read.csv("/home/ubuntu/hdd/tcga/clinic/new.filt.cdr.csv", header = T, row.names = 1)
+
+# log2 transformation of tpm
+tpm <- log2(tpm + 1)
+tpm <- as.data.frame(t(tpm))
+tpm$sample_barcode <- rownames(tpm)
+dataset <- merge(tpm, cdr[ ,c(2,3,35)], by="sample_barcode") # sample_barcode & Metastasis columns in cdr
+dataset$Metastasis <- as.factor(dataset$Metastasis)
+
+# Load the DEG feature sets
+fs_dir <- "/home/ubuntu/hdd/tcga/machines/features/deg"
+featureSets <- list()
+for(x in 1:6){ # excluded 1 & 2
+  set <- read.delim(file.path(fs_dir, paste0("feature.", x, ".list")), header = F)
+  featureSets[[as.character(x)]] <- as.vector(set$V1)
+}
+
+# 10% for independent testing, 90% for training
+set.seed(88)
+sample <- sample.split(dataset$Metastasis, SplitRatio = 0.9)
+base_train <- subset(dataset, sample==T)
+base_test <- subset(dataset, sample==F) # For independent testing later
+base_test_labels <- base_test$Metastasis
+
+# Ensemble different resampled datasets
+all_noM <- base_train %>% filter(Metastasis==0)
+train_M <- base_train %>% filter(Metastasis==1)
+
+ensemblLists <- function(imbalanced0, imbalanced1, numOfList){
+  trainlists <- list()
+  t <- 1
+  while(t < numOfList){
+    sample <- sample.split(imbalanced0$sample_barcode, SplitRatio=nrow(imbalanced1)/nrow(imbalanced0))
+    train_noM <- subset(imbalanced0, sample==T)
+    imbalanced0 <- subset(imbalanced0, sample==F)
+    trainlists[[as.character(t)]] <- list()
+    trainlists[[as.character(t)]]$tpm <- rbind(imbalanced1, train_noM)
+    trainlists[[as.character(t)]]$labels <- as.data.frame(trainlists[[as.character(t)]]$tpm$Metastasis)
+    colnames(trainlists[[as.character(t)]]$labels) <- "label"
+    t <- t + 1
+  }
+
+  # Add the 13th training set
+  trainlists[[as.character(numOfList)]] <- list()
+  trainlists[[as.character(numOfList)]]$tpm <- rbind(imbalanced1, imbalanced0)
+  trainlists[[as.character(numOfList)]]$labels <- as.data.frame(trainlists[[as.character(numOfList)]]$tpm$Metastasis)
+  colnames(trainlists[[as.character(numOfList)]]$labels) <- "label"
+  trainlists
+}
+  
+trainlists <- ensemblLists(all_noM, train_M, 13)
+```
+
+#### Cross validation
+```{R CV}
+# Function to get ACC, SN, SP, F1, MCC, AUC, BAC
+perf_results <- function(actual, predicted, predictionScores, model){
+ results <- list()
+ cm <- confusionMatrix(data=as.factor(predicted), reference=as.factor(actual), positive="1")
+ results[['ACC']] <- as.numeric(cm$overall['Accuracy'])
+ results[['SN']] <- as.numeric(cm$byClass['Sensitivity'])
+ results[['SP']] <- as.numeric(cm$byClass['Specificity'])
+ results[['F1']] <- as.numeric(cm$byClass['F1'])
+ results[['MCC']] <- ((cm$table[1,1]*cm$table[2,2])-(cm$table[1,2]*cm$table[2,1]))/(sqrt(cm$table[1,1]+cm$table[1,2])*sqrt(cm$table[1,1]+cm$table[2,1])*sqrt(cm$table[2,2]+cm$table[1,2])*sqrt(cm$table[2,2]+cm$table[2,1]))
+ results[['AUC']] <- auc(roc(response=as.vector(actual), predictor=as.vector(predictionScores)))
+ results[['BAC']] <- as.numeric(cm$byClass['Balanced Accuracy'])
+ results[['model']] <- model
+ #results[['ROC']] <- plot.roc(roc(as.vector(actual), as.vector(predictionScores)))
+ results
+}
+
+# Function to run svm
+svmCV <- function(trainlist, featureSets){
+  tpm <- trainlist[["tpm"]]
+  labels <- trainlist[["labels"]]
+  parameters.list <- list()
+  results.list <- list()
+  
+  for(fs in 1:length(featureSets)){
+    results.list[[as.character(fs)]] <- list()
+    parameters.list[[as.character(fs)]] <- list()
+    
+    #Subset TPM
+    cv_train <- tpm[, which(names(tpm) %in% c("type", "Metastasis", featureSets[[as.character(fs)]]))]
+    
+    # Create 5 folds
+    folds <- createFolds(labels$label, k=5)
+    for(i in 1:5){
+      results.list[[as.character(fs)]][[i]] <- list()
+      parameters.list[[as.character(fs)]][[i]] <- list()
+      
+      # 1/5 for validation, 4/5 for training
+      sub_cv_train <- cv_train[-folds[[i]],]
+      sub_cv_train_labels <- labels[-folds[[i]],]
+      sub_cv_validate <- cv_train[folds[[i]],]
+      sub_cv_validate_labels <- labels[folds[[i]],]
+      
+      # Initialize model & parameters
+      ksvm_model <- ksvm(Metastasis~., sub_cv_train, kernel = 'rbfdot', type="C-svc", kpar = 'automatic', prob.model=TRUE)
+      predictionLabels <- predict(ksvm_model, sub_cv_validate, type = 'response')
+      predictionDecisions <- predict(ksvm_model, sub_cv_validate, type = 'probabilities')
+      results.list[[as.character(fs)]][[i]] <- perf_results(sub_cv_validate_labels, predictionLabels, predictionDecisions[,1], ksvm_model)
+      parameters.list[[as.character(fs)]][[i]] <- ksvm_model
+      
+      print(paste0("FeatureSet ", fs, " Fold ", i))
+      print(paste0("  AUC:", round(results.list[[as.character(fs)]][[i]]$AUC, 6), ";", 
+                   "  MCC: ", round(results.list[[as.character(fs)]][[i]]$MCC,6), ";",
+                   "  BAC: ", round(results.list[[as.character(fs)]][[i]]$BAC,6)))
+    }
+  }
+  list(results.list=results.list, parameters.list=parameters.list)
+}
+
+# Loop for ensembled training sets
+SVM.lists <- list()
+for(i in 1:length(trainlists)){
+  print(paste0("=========================Trainlist ", i, "========================="))
+  SVM.lists[[as.character(i)]] <- svmCV(trainlists[[as.character(i)]], featureSets)
+}
+
+```
+
+### Test on the independent testing set
+
+```{R test}
+testSVM <- function(testset, parameters.list, featureSets){
+  # Find the best model from every 5 folds of every 6 feature sets
+  # Find the best fold from all trainlists
+  test.list <- list()
+  test.list$bestAUC <- 0
+  test.list$bestFS <- 0
+  test.list$bestModel <- NA
+  
+  for(fs in 1:length(featureSets)){
+    test.list[[as.character(fs)]] <- list()
+    test.list[[as.character(fs)]]$bestAUC <- 0
+    
+    # Subset expression data
+    sub_test <- testset[, which(names(testset) %in% c("type", "Metastasis", featureSets[[as.character(fs)]]))]
+    sub_test_labels <- testset$Metastasis
+    
+    # loop the folds
+    for(i in 1:5){
+      model <- parameters.list[[as.character(fs)]][[i]]
+      # Test on testing set
+      predictionLabels_test <- predict(model, sub_test, type='response')
+      predictionPrs_test <- predict(model, sub_test, type='prob')
+      test_results <- perf_results(sub_test_labels, predictionLabels_test, predictionPrs_test[,1], model)
+      # Find the highest AUC from models trained in 5 folds
+      if(test_results$AUC > test.list[[as.character(fs)]]$bestAUC){
+        test.list[[as.character(fs)]]$bestAUC <- test_results$AUC
+        test.list[[as.character(fs)]]$bestBAC <- test_results$BAC
+        test.list[[as.character(fs)]]$bestMCC <- test_results$MCC
+        test.list[[as.character(fs)]]$results <- test_results
+        test.list[[as.character(fs)]]$bestModel <- model
+      }
+    }
+    # Find the highest AUC from models trained in 6 featuresets
+    if(test.list[[as.character(fs)]]$bestAUC > test.list$bestAUC){
+      test.list$bestAUC <- test.list[[as.character(fs)]]$bestAUC
+      test.list$bestFS <- fs
+      test.list$bestModel <- test.list[[as.character(fs)]][['bestModel']]
+    }
+  }
+  print(paste0("  The best FS: ", test.list$bestFS, ", AUC ", round(test.list$bestAUC, 5)))
+  test.list
+}
+
+test.results <- list()
+test.results$bestAUC <- 0
+
+for(i in 1:length(trainlists)){
+  print(paste0("Trainlist", i))
+  test.results[[as.character(i)]] <- testSVM(base_test, SVM.lists[[as.character(i)]][["parameters.list"]], featureSets)
+  if(test.results[[as.character(i)]]$bestAUC > test.results$bestAUC){
+    test.results$bestAUC <- test.results[[as.character(i)]]$bestAUC
+    test.results$bestModel <- test.results[[as.character(i)]]$bestModel
+    test.results$bestFS <- test.results[[as.character(i)]]$bestFS
+  }
+}
+
+print(paste("Best Testing AUC: ", test.results$bestAUC, " with best set", test.results$bestFS))
+
+```
+
+### Draw the performances
+```{R plot}
+draw_CCC <- function(results.list){
+  
+  # AUC
+  auc_df <- data.frame(fs1 = rep(0,length(trainlists)), fs2 = rep(0,length(trainlists)),
+                         fs3 = rep(0,length(trainlists)), fs4 = rep(0,length(trainlists)),
+                         fs5 = rep(0,length(trainlists)), fs6 = rep(0,length(trainlists)))
+
+  for(list in 1:length(trainlists)){
+    for(fs in 1:length(featureSets)){
+      auc_df[list,][fs] <- results.list[[as.character(list)]][[as.character(fs)]][["bestAUC"]]
+    }
+  }
+  auc_p <- ggplot(stack(auc_df), aes(x=ind, y=values, fill=ind)) +
+    geom_boxplot() + scale_y_continuous(limits=c(0,1)) +
+    labs(title="AUC", x="", y="", fill="Sets") + scale_fill_brewer(palette="Dark2") +
+    theme_classic()
+  
+  # BAC
+  bac_df <- data.frame(fs1 = rep(0,length(trainlists)), fs2 = rep(0,length(trainlists)),
+                         fs3 = rep(0,length(trainlists)), fs4 = rep(0,length(trainlists)),
+                         fs5 = rep(0,length(trainlists)), fs6 = rep(0,length(trainlists)))
+
+  for(list in 1:length(trainlists)){
+    for(fs in 1:length(featureSets)){
+      bac_df[list,][fs] <- results.list[[as.character(list)]][[as.character(fs)]][["bestBAC"]]
+    }
+  }
+  bac_p <- ggplot(stack(bac_df), aes(x=ind, y=values, fill=ind)) +
+    geom_boxplot() + scale_y_continuous(limits=c(0,1)) +
+    labs(title="BAC", x="", y="", fill="Sets") + scale_fill_brewer(palette="Dark2") +
+    theme_classic()
+  
+  # MCC
+  mcc_df <- data.frame(fs1 = rep(0,length(trainlists)), fs2 = rep(0,length(trainlists)),
+                         fs3 = rep(0,length(trainlists)), fs4 = rep(0,length(trainlists)),
+                         fs5 = rep(0,length(trainlists)), fs6 = rep(0,length(trainlists)))
+
+  for(list in 1:length(trainlists)){
+    for(fs in 1:length(featureSets)){
+      mcc_df[list,][fs] <- results.list[[as.character(list)]][[as.character(fs)]][["bestMCC"]]
+    }
+  }
+  mcc_p <- ggplot(stack(mcc_df), aes(x=ind, y=values, fill=ind)) +
+    geom_boxplot() + scale_y_continuous(limits=c(0,1)) +
+    labs(title="MCC", x="", y="", fill="Sets") + scale_fill_brewer(palette="Dark2") +
+    theme_classic()
+
+  ggarrange(auc_p, bac_p, mcc_p, ncol=3, nrow=1, common.legend=T, legend = "right")
+}
+
+draw_CCC(test.results)
+
+```
+
+### Results analysis
+
+```{R analysis}
+final.model <- test.results$bestModel
+final.FS <- test.results$bestFS
+final.test <- base_test[, which(names(base_test) %in% c("type", "Metastasis",  featureSets[[as.character(final.FS)]]))]
+final.predictionLabels <- predict(final.model, newdata=final.test, type='response')
+final.predictionDes <- predict(final.model, newdata=final.test, type='probabilities')
+```
+
+#### ROC curve
+```{R roc}
+plot.roc(roc(as.numeric(base_test_labels), as.vector(final.predictionDes[,1])))
+auc(roc(as.vector(base_test_labels), as.numeric(final.predictionDes[,1])))
+confusionMatrix(as.factor(final.predictionLabels), as.factor(base_test_labels), positive="1")
+```
+
+
+#### Distribution of prediction scores
+```{R distribution}
+tmp.scores <- as.data.frame(final.predictionDes[,1])
+colnames(tmp.scores) <- "predictionScores"
+
+ggplot(tmp.scores, aes(x=predictionScores)) +
+  geom_density() +
+  ggtitle("Distribution of metastasis predictions scores") +
+  coord_cartesian(xlim=c(0,1)) +
+  theme_minimal()
+
+```
+
+### Important variables
+```{R imptVar, eval=F}
+#????
+```
+
+### Save
+```{r}
+result_dir <- "/home/ubuntu/hdd/tcga/machines/results/svm/deg"
+saveRDS(SVM.lists, file.path(result_dir, "SVM.lists.rds"))
+saveRDS(test.results, file.path(result_dir, "test.list.rds"))
+```
